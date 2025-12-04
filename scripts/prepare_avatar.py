@@ -10,6 +10,12 @@ import json
 import shutil
 from tqdm import tqdm
 
+# Добавляем корневую директорию проекта в sys.path для импорта musetalk
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(script_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from musetalk.utils.face_parsing import FaceParsing
 from musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs
 from musetalk.utils.blending import get_image_prepare_material

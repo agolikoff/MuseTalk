@@ -1,0 +1,1085 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Recording and Video</title>
+    <style>
+        /* Base reset and global styles */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Arial', sans-serif;
+            background-color: #f5f5f7;
+            color: #333;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Main container style */
+        .real-time-container {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            max-width: 540px;
+            aspect-ratio: 540 / 960;
+            height: auto;
+            position: relative;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            margin: 0 auto;
+        }
+
+        /* Header button group */
+        .ah-agent-header {
+            display: flex;
+            justify-content: flex-end;
+            padding: 10px;
+            z-index: 1000;
+        }
+
+        .ah-btn-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        .ah-btn {
+            background: rgba(255, 255, 255, 0.2);
+            border: none;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(5px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .ah-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
+        }
+
+        .ah-icon {
+            transition: all 0.3s ease;
+        }
+
+        /* Character container */
+        .ah-character-box {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .ah-character-avatar {
+            position: relative;
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+            background: #fff;
+        }
+
+        /* Character background */
+        .ah-character-bg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+            filter: blur(8px);
+            opacity: 0.7;
+            display: none;
+        }
+
+        /* Call button */
+        .btn-character-call {
+            position: absolute;
+            bottom: 30px;
+            right: 30px;
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            box-shadow: 0 10px 20px rgba(118, 75, 162, 0.3);
+            z-index: 9999;
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+        }
+
+        .btn-character-call:hover {
+            transform: scale(1.1);
+            box-shadow: 0 15px 25px rgba(118, 75, 162, 0.4);
+        }
+
+        /* Active state */
+        .btn-character-call.active {
+            background: linear-gradient(135deg, #ff5e62 0%, #ff9966 100%);
+        }
+
+        .btn-character-call.recording {
+            background: linear-gradient(135deg, #ff5e62 0%, #ff9966 100%);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                transform: scale(1);
+            }
+            50% {
+                transform: scale(1.1);
+            }
+        }
+
+        /* Chat container */
+        .ah-character-chat {
+            position: fixed;
+            bottom: 100px;
+            left: 20px;
+            right: 20px;
+            max-height: 30vh;
+            overflow-y: auto;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 999;
+        }
+
+        .character-chat-item {
+            max-width: 70%;
+            padding: 12px 18px;
+            border-radius: 18px;
+            font-size: 16px;
+            line-height: 1.4;
+            animation: fadeIn 0.3s ease-out;
+        }
+
+        .item-user {
+            align-self: flex-end;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .item-character {
+            align-self: flex-start;
+            background: white;
+            color: #333;
+            border-bottom-left-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Scrollbar style */
+        .ah-character-chat::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .ah-character-chat::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.05);
+            border-radius: 10px;
+        }
+
+        .ah-character-chat::-webkit-scrollbar-thumb {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+        }
+
+        /* Animation definition */
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* Video element with aspect ratio 540/960 */
+        #character-avatar-video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            z-index: 5;
+        }
+
+        #character-static-image {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            z-index: 2;
+        }
+
+        /* Status indicator */
+        .status-indicator {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            padding: 10px 15px;
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 20px;
+            font-size: 14px;
+            z-index: 1000;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .status-indicator.error {
+            background: rgba(231, 76, 60, 0.9);
+            color: white;
+        }
+
+        .status-indicator.success {
+            background: rgba(39, 174, 96, 0.9);
+            color: white;
+        }
+
+        .status-indicator.loading {
+            background: rgba(52, 152, 219, 0.9);
+            color: white;
+        }
+
+        /* Timer */
+        .timer {
+            position: absolute;
+            top: 70px;
+            left: 20px;
+            padding: 8px 15px;
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 20px;
+            font-size: 16px;
+            font-weight: bold;
+            z-index: 1000;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            display: none;
+        }
+
+        /* Typing animation */
+        .typing-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 0;
+        }
+
+        .typing-dot {
+            width: 8px;
+            height: 8px;
+            background: currentColor;
+            border-radius: 50%;
+            animation: typingAnimation 1.4s ease-in-out infinite;
+            opacity: 0.6;
+        }
+
+        .typing-dot:nth-child(1) {
+            animation-delay: 0s;
+        }
+
+        .typing-dot:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-dot:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes typingAnimation {
+            0%, 60%, 100% {
+                transform: translateY(0);
+                opacity: 0.6;
+            }
+            30% {
+                transform: translateY(-8px);
+                opacity: 1;
+            }
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            .ah-character-chat {
+                bottom: 80px;
+                max-height: 25vh;
+            }
+
+            .btn-character-call {
+                width: 50px;
+                height: 50px;
+                bottom: 20px;
+                right: 20px;
+            }
+        }
+
+        /* Dark mode */
+        @media (prefers-color-scheme: dark) {
+            body {
+                background-color: #121212;
+                color: #e0e0e0;
+            }
+
+            .ah-character-avatar {
+                background: #1e1e1e;
+            }
+
+            .item-character {
+                background: #2d2d2d;
+                color: #e0e0e0;
+            }
+
+            .ah-btn {
+                background: rgba(30, 30, 30, 0.5);
+            }
+        }
+    </style>
+</head>
+<body>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <div class="real-time-container">
+        <!-- character container -->
+        <div class="ah-character-box">
+            <div class="ah-character-avatar">
+                <!-- Static image displayed by default -->
+                <img id="character-static-image" src="avatar.jpg" alt="">
+                <!-- Video playback element (initially hidden) -->
+                <video id="character-avatar-video" autoplay playsinline></video>
+            </div>
+        </div>
+
+        <div class="ah-character-bg">
+            <img style="width: 100%;height: 100%;object-fit: cover;" src="avatar.jpg" alt="">
+        </div>
+
+        <!-- Status indicator -->
+        <div id="status" class="status-indicator" style="display: none;"></div>
+        <div id="timer" class="timer"></div>
+
+        <!-- Call button -->
+        <button class="ah-btn ah-btn-icon btn-character-call" id="btnRealtime">
+            <svg class="ah-icon" width="22" height="22" viewBox="0 0 24 24" fill="#fff"
+                 xmlns="http://www.w3.org/2000/svg">
+                <path d="M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z"/>
+            </svg>
+        </button>
+    </div>
+
+    <script>
+        // WebSocket settings for speech recognition
+        const WEBSOCKET_SERVER_URL = 'https://avatar.stacqan.com';
+        const WEBSOCKET_PATH = '/api-voice/socket.io';
+        const AUTH_TOKEN = 'sk_live_h8mvwCjYP3hIzpxziW4Ey00GWfWfOtQfju13_uGAzWA';
+        const LANGUAGE_CODE = 'en-US'; // 'en-US' or 'ru-RU'
+        
+        // WebRTC settings (from test file)
+        const WEBRTC_API_URL = 'https://avatar.stacqan.com/api-rtc';
+        const TASK_ID = 'couch_ashley';
+        const VIDEO_PATH = 'data/video/couch_ashley.mp4';
+        const AUDIO_PATH = 'data/audio/test.wav';
+        const VERSION = 'v15';
+        const FPS = 15;
+        const BATCH_SIZE = 12;
+        const TURN_SERVER_URL = '';
+        const TURN_USERNAME = 'webrtc';
+        const TURN_CREDENTIAL = 'my_password';
+        const DIALOG_ID = '2044c9fd-4f37-433f-b604-48de45c1fba0';
+
+        const videoPlayer = document.getElementById('character-avatar-video');
+        const staticImage = document.getElementById('character-static-image');
+        const recordButton = document.getElementById('btnRealtime');
+        const statusDiv = document.getElementById('status');
+        const timerDiv = document.getElementById('timer');
+
+        // Initialize: hide video, show static image
+        if (videoPlayer) {
+            videoPlayer.style.display = 'none';
+        }
+        if (staticImage) {
+            staticImage.style.display = 'block';
+        }
+
+        // WebSocket and audio streaming
+        let socket = null;
+        let audioContext = null;
+        let audioStream = null;
+        let processor = null;
+        let isRecording = false;
+        let recognitionActive = false;
+        let recordingStartTime = null;
+        let timerInterval = null;
+        
+        // WebRTC
+        let pc = null; // WebRTC peer connection
+        let isWebRTCConnected = false;
+        let reconnectAttempts = 0;
+        let maxReconnectAttempts = 5;
+        let isReconnecting = false;
+        let reconnectTimeout = null;
+        let connectingTimeout = null;
+        const CONNECTING_TIMEOUT_MS = 3000; // 10 seconds
+
+        // Initialize WebRTC streaming
+        async function initWebRTCStreaming() {
+            if (pc && isWebRTCConnected) {
+                return;
+            }
+
+            try {
+                // Basic ICE servers
+                const iceServers = [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' }
+                ];
+                
+                // Add TURN server if specified
+                if (TURN_SERVER_URL && TURN_USERNAME && TURN_CREDENTIAL) {
+                    const turnUrls = [TURN_SERVER_URL];
+                    if (!TURN_SERVER_URL.includes('?transport=')) {
+                        turnUrls.push(`${TURN_SERVER_URL}?transport=tcp`);
+                    }
+                    iceServers.push({
+                        urls: turnUrls,
+                        username: TURN_USERNAME,
+                        credential: TURN_CREDENTIAL
+                    });
+                } else {
+                    // Use public TURN servers as fallback
+                    iceServers.push(
+                        {
+                            urls: [
+                                'turn:openrelay.metered.ca:80',
+                                'turn:openrelay.metered.ca:443',
+                                'turn:openrelay.metered.ca:443?transport=tcp'
+                            ],
+                            username: 'openrelayproject',
+                            credential: 'openrelayproject'
+                        },
+                        {
+                            urls: [
+                                'turn:relay.metered.ca:80',
+                                'turn:relay.metered.ca:443',
+                                'turn:relay.metered.ca:443?transport=tcp'
+                            ],
+                            username: 'openrelayproject',
+                            credential: 'openrelayproject'
+                        }
+                    );
+                }
+                
+                // Create RTCPeerConnection
+                pc = new RTCPeerConnection({
+                    iceServers: iceServers,
+                    iceCandidatePoolSize: 10
+                });
+
+                // Event handlers
+                pc.oniceconnectionstatechange = () => {
+                    console.log(`ICE connection: ${pc.iceConnectionState}`);
+                    if (pc.iceConnectionState === 'connected') {
+                        isWebRTCConnected = true;
+                        // Reset attempt counter on successful connection
+                        reconnectAttempts = 0;
+                        isReconnecting = false;
+                        if (reconnectTimeout) {
+                            clearTimeout(reconnectTimeout);
+                            reconnectTimeout = null;
+                        }
+                        // Clear connecting timeout
+                        if (connectingTimeout) {
+                            clearTimeout(connectingTimeout);
+                            connectingTimeout = null;
+                        }
+                        showStatus('WebRTC connection established', 'success');
+                        // Connect WebSocket after successful WebRTC establishment
+                        connectWebSocket();
+                    } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+                        isWebRTCConnected = false;
+                        showStatus('WebRTC connection lost', 'error');
+                        // Clear connecting timeout
+                        if (connectingTimeout) {
+                            clearTimeout(connectingTimeout);
+                            connectingTimeout = null;
+                        }
+                        // Disconnect WebSocket on WebRTC connection loss
+                        disconnectWebSocket();
+                        // Automatic reconnection
+                        if (!isReconnecting && reconnectAttempts < maxReconnectAttempts) {
+                            attemptReconnect();
+                        } else if (reconnectAttempts >= maxReconnectAttempts) {
+                            showStatus(`Reconnection attempt limit exceeded (${maxReconnectAttempts})`, 'error');
+                        }
+                    }
+                };
+
+                pc.onconnectionstatechange = () => {
+                    console.log(`Connection state: ${pc.connectionState}`);
+                    
+                    // Clear connecting timeout on any state change
+                    if (connectingTimeout) {
+                        clearTimeout(connectingTimeout);
+                        connectingTimeout = null;
+                    }
+                    
+                    if (pc.connectionState === 'connected') {
+                        // Reset counter on successful connection
+                        reconnectAttempts = 0;
+                        isReconnecting = false;
+                        if (reconnectTimeout) {
+                            clearTimeout(reconnectTimeout);
+                            reconnectTimeout = null;
+                        }
+                        // Ensure WebSocket is connected
+                        if (!socket || !socket.connected) {
+                            connectWebSocket();
+                        }
+                    } else if (pc.connectionState === 'connecting') {
+                        // Set timeout for connecting state
+                        console.log(`Connection state: connecting, setting timeout for ${CONNECTING_TIMEOUT_MS}ms`);
+                        connectingTimeout = setTimeout(() => {
+                            console.log(`Connection timeout: connecting state exceeded ${CONNECTING_TIMEOUT_MS}ms, reconnecting...`);
+                            showStatus('Connection timeout, reconnecting...', 'error');
+                            connectingTimeout = null;
+                            
+                            // Close current connection
+                            if (pc) {
+                                try {
+                                    pc.close();
+                                } catch (e) {
+                                    console.error(`Error closing connection: ${e}`);
+                                }
+                                pc = null;
+                            }
+                            
+                            // Clear video stream
+                            if (videoPlayer && videoPlayer.srcObject) {
+                                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
+                                videoPlayer.srcObject = null;
+                                videoPlayer.style.display = 'none';
+                            }
+                            // Show static image
+                            if (staticImage) {
+                                staticImage.style.display = 'block';
+                            }
+                            
+                            // Disconnect WebSocket
+                            disconnectWebSocket();
+                            
+                            // Try to reconnect
+                            if (!isReconnecting && reconnectAttempts < maxReconnectAttempts) {
+                                attemptReconnect();
+                            } else if (reconnectAttempts >= maxReconnectAttempts) {
+                                showStatus(`Reconnection attempt limit exceeded (${maxReconnectAttempts})`, 'error');
+                            }
+                        }, CONNECTING_TIMEOUT_MS);
+                    } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+                        // Disconnect WebSocket on connection loss
+                        disconnectWebSocket();
+                        // Automatic reconnection
+                        if (!isReconnecting && reconnectAttempts < maxReconnectAttempts) {
+                            attemptReconnect();
+                        }
+                    }
+                };
+
+                pc.onicegatheringstatechange = () => {
+                    console.log(`ICE gathering: ${pc.iceGatheringState}`);
+                };
+
+                pc.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        console.log(`ICE candidate: ${event.candidate.type} ${event.candidate.protocol}`);
+                    }
+                };
+
+                pc.ontrack = (event) => {
+                    console.log(`Media stream received: ${event.track.kind}`);
+                    if (event.track.kind === 'video') {
+                        videoPlayer.srcObject = event.streams[0];
+                        // Hide static image and show video
+                        if (staticImage) {
+                            //staticImage.style.display = 'none';
+                        }
+                        videoPlayer.style.display = 'block';
+                        showStatus('Video stream received', 'success');
+                        
+                        videoPlayer.onloadedmetadata = async () => {
+                            console.log(`Video metadata: ${videoPlayer.videoWidth}x${videoPlayer.videoHeight}`);
+                            // Force play after metadata is loaded
+                            try {
+                                await videoPlayer.play();
+                                console.log('Video playback started');
+                            } catch (error) {
+                                console.error('Autoplay failed, user interaction required:', error);
+                                showStatus('Click anywhere to start video playback', 'loading');
+                                // Add click handler to start playback
+                                const startPlayback = async () => {
+                                    try {
+                                        await videoPlayer.play();
+                                        console.log('Video playback started after user interaction');
+                                        showStatus('Video playback started', 'success');
+                                        document.removeEventListener('click', startPlayback);
+                                        document.removeEventListener('touchstart', startPlayback);
+                                    } catch (e) {
+                                        console.error('Playback error:', e);
+                                    }
+                                };
+                                document.addEventListener('click', startPlayback, { once: true });
+                                document.addEventListener('touchstart', startPlayback, { once: true });
+                            }
+                        };
+                        
+                        videoPlayer.onplay = () => {
+                            console.log('Video playback started');
+                        };
+                        
+                        videoPlayer.onerror = (e) => {
+                            console.error('Video error:', e);
+                            showStatus('Video playback error', 'error');
+                            // Show static image on error
+                            if (staticImage) {
+                                staticImage.style.display = 'block';
+                            }
+                            videoPlayer.style.display = 'none';
+                        };
+                    }
+                };
+
+                // Add transceivers for receiving video and audio
+                pc.addTransceiver('video', { direction: 'recvonly' });
+                pc.addTransceiver('audio', { direction: 'recvonly' });
+
+                // Create offer
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                console.log('Sending offer to server...');
+                
+                // Send offer to server
+                const response = await fetch(`${WEBRTC_API_URL}/api/webrtc/offer`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        sdp: offer.sdp,
+                        type: offer.type,
+                        task_id: TASK_ID,
+                        video_path: VIDEO_PATH,
+                        audio_path: AUDIO_PATH,
+                        version: VERSION,
+                        fps: FPS,
+                        batch_size: BATCH_SIZE
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Server error');
+                }
+
+                const answerData = await response.json();
+                console.log('Answer received from server');
+
+                // Set remote description
+                await pc.setRemoteDescription(new RTCSessionDescription(answerData));
+                console.log('WebRTC connection established');
+                isWebRTCConnected = true;
+
+            } catch (error) {
+                console.error('Error initializing WebRTC:', error);
+                showStatus('WebRTC error: ' + error.message, 'error');
+                if (pc) {
+                    pc.close();
+                    pc = null;
+                }
+                isWebRTCConnected = false;
+            }
+        }
+
+        // Automatic reconnection function
+        async function attemptReconnect() {
+            if (isReconnecting) {
+                return; // Reconnection already in progress
+            }
+            
+            isReconnecting = true;
+            reconnectAttempts++;
+            
+            console.log(`Reconnection attempt ${reconnectAttempts}/${maxReconnectAttempts}...`);
+            showStatus(`Reconnection attempt ${reconnectAttempts}/${maxReconnectAttempts}...`, 'loading');
+            
+            // Clear connecting timeout
+            if (connectingTimeout) {
+                clearTimeout(connectingTimeout);
+                connectingTimeout = null;
+            }
+            
+            // Close current connection
+            if (pc) {
+                try {
+                    pc.close();
+                } catch (e) {
+                    console.error(`Error closing connection: ${e}`);
+                }
+                pc = null;
+            }
+            
+            // Clear video stream
+            if (videoPlayer && videoPlayer.srcObject) {
+                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
+                videoPlayer.srcObject = null;
+                videoPlayer.style.display = 'none';
+            }
+            // Show static image
+            if (staticImage) {
+                staticImage.style.display = 'block';
+            }
+            
+            // Exponential delay before reconnection (maximum 10 seconds)
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000);
+            console.log(`Waiting ${delay}ms before reconnection...`);
+            
+            reconnectTimeout = setTimeout(async () => {
+                try {
+                    await initWebRTCStreaming();
+                    console.log('Reconnection successful');
+                    showStatus('Reconnection successful', 'success');
+                } catch (e) {
+                    console.error(`Error during reconnection: ${e}`);
+                    if (reconnectAttempts < maxReconnectAttempts) {
+                        isReconnecting = false; // Allow next attempt
+                        attemptReconnect(); // Try again
+                    } else {
+                        isReconnecting = false;
+                        showStatus('Failed to restore connection after all attempts', 'error');
+                    }
+                }
+            }, delay);
+        }
+
+        // Initialize on page load
+        initWebRTCStreaming();
+
+        // WebSocket connection for speech recognition
+        async function connectWebSocket() {
+            // Check that WebRTC connection is established
+            if (!isWebRTCConnected) {
+                console.log('WebSocket: WebRTC not connected yet, skipping WebSocket connection');
+                return;
+            }
+
+            if (socket && socket.connected) {
+                return;
+            }
+
+            try {
+                // Collect query parameters
+                const query = {
+                    task_id: TASK_ID,
+                    dialog_id: DIALOG_ID
+                };
+
+                socket = io(WEBSOCKET_SERVER_URL, {
+                    path: WEBSOCKET_PATH,
+                    auth: {
+                        token: AUTH_TOKEN
+                    },
+                    query: query,
+                    transports: ['websocket', 'polling']
+                });
+
+                socket.on('connect', () => {
+                    console.log('WebSocket connected');
+                    showStatus('WebSocket connected', 'success');
+                });
+
+                socket.on('disconnect', () => {
+                    console.log('WebSocket disconnected');
+                    showStatus('WebSocket disconnected', 'error');
+                    if (isRecording) {
+                        stopRecording();
+                    }
+                });
+
+                socket.on('connect_error', (error) => {
+                    console.error('WebSocket connection error:', error);
+                    showStatus('WebSocket connection error: ' + error.message, 'error');
+                });
+
+                socket.on('recognition-started', (data) => {
+                    console.log('Recognition started:', data);
+                    recognitionActive = true;
+                    showStatus('Recognition started', 'success');
+                });
+
+                socket.on('recognition-result', (data) => {
+                    console.log('Recognition result:', data);
+                    // Can add recognition results display
+                });
+
+                socket.on('recognition-error', (data) => {
+                    console.error('Recognition error:', data);
+                    showStatus('Recognition error: ' + data.message, 'error');
+                    if (isRecording) {
+                        stopRecording();
+                    }
+                });
+
+                socket.on('recognition-stopped', (data) => {
+                    console.log('Recognition stopped:', data);
+                    recognitionActive = false;
+                    showStatus('Recognition stopped', 'success');
+                });
+
+            } catch (error) {
+                console.error('Error connecting WebSocket:', error);
+                showStatus('Connection error: ' + error.message, 'error');
+            }
+        }
+
+        // Disconnect WebSocket
+        function disconnectWebSocket() {
+            if (socket) {
+                if (isRecording) {
+                    stopRecording();
+                }
+                socket.disconnect();
+                socket = null;
+                console.log('WebSocket disconnected');
+            }
+        }
+
+        // Audio recording with continuous WebSocket streaming
+        recordButton.addEventListener('click', async () => {
+            if (!isRecording) {
+                await startRecording();
+            } else {
+                stopRecording();
+            }
+        });
+
+        async function startRecording() {
+            // Check that WebRTC connection is established
+            if (!isWebRTCConnected) {
+                showStatus('Please wait for WebRTC connection to be established', 'error');
+                return;
+            }
+
+            // Connect WebSocket if not connected
+            if (!socket || !socket.connected) {
+                await connectWebSocket();
+                // Wait a bit for connection to establish
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+
+            if (!socket || !socket.connected) {
+                showStatus('Failed to connect to recognition server', 'error');
+                return;
+            }
+
+            try {
+                // Request microphone access
+                audioStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        channelCount: 1,
+                        sampleRate: 16000,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                    }
+                });
+
+                // Create AudioContext with required sample rate
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 16000
+                });
+
+                const source = audioContext.createMediaStreamSource(audioStream);
+                
+                // Create ScriptProcessorNode for audio data processing
+                // bufferSize: 4096 gives approximately 256ms of audio at 16kHz
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
+                
+                processor.onaudioprocess = (e) => {
+                    if (!isRecording || !socket || !socket.connected || !recognitionActive) {
+                        return;
+                    }
+
+                    // Get PCM data (Float32Array)
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    
+                    // Convert Float32 (-1.0 to 1.0) to Int16 (-32768 to 32767)
+                    const int16Array = new Int16Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        // Clamp value between -1 and 1
+                        const s = Math.max(-1, Math.min(1, inputData[i]));
+                        // Convert to 16-bit integer
+                        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    }
+                    
+                    // Send as Uint8Array (bytes)
+                    socket.emit('audio-chunk', new Uint8Array(int16Array.buffer));
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                // Start recognition on server
+                socket.emit('start-recognition', { languageCode: LANGUAGE_CODE });
+
+                isRecording = true;
+                recordingStartTime = Date.now();
+                recordButton.classList.add('recording', 'active');
+                recordButton.innerHTML = '<svg class="ah-icon" width="22" height="22" viewBox="0 0 22 22" fill="#fff" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="10" height="10" rx="2"/></svg>';
+                recordButton.title = 'Click to stop recording';
+                showStatus('🔴 Recording...', 'loading');
+                startTimer();
+
+            } catch (error) {
+                showStatus('Error starting recording: ' + error.message, 'error');
+                console.error('Recording error:', error);
+            }
+        }
+
+        function stopRecording() {
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+
+            if (audioContext) {
+                audioContext.close().catch(console.error);
+                audioContext = null;
+            }
+
+            if (audioStream) {
+                audioStream.getTracks().forEach(track => track.stop());
+                audioStream = null;
+            }
+
+            if (socket && socket.connected && recognitionActive) {
+                socket.emit('stop-recognition');
+            }
+
+            isRecording = false;
+            recognitionActive = false;
+            recordButton.classList.remove('recording', 'active');
+            recordButton.innerHTML = '<svg class="ah-icon" width="22" height="22" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg"><path d="M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z"/></svg>';
+            recordButton.title = 'Click to start recording';
+            stopTimer();
+            showStatus('Recording stopped', 'success');
+        }
+
+        function startTimer() {
+            if (timerDiv) {
+                timerDiv.style.display = 'block';
+                timerInterval = setInterval(() => {
+                    const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+                    const minutes = Math.floor(elapsed / 60);
+                    const seconds = elapsed % 60;
+                    timerDiv.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+                }, 1000);
+            }
+        }
+
+        function stopTimer() {
+            if (timerInterval) {
+                clearInterval(timerInterval);
+                timerInterval = null;
+            }
+            if (timerDiv) {
+                timerDiv.style.display = 'none';
+                timerDiv.textContent = '';
+            }
+        }
+
+        function showStatus(message, type = '') {
+            if (statusDiv) {
+                statusDiv.textContent = message;
+                statusDiv.className = 'status-indicator ' + type;
+                statusDiv.style.display = 'block';
+                
+                if (type === 'success') {
+                    setTimeout(() => {
+                        statusDiv.style.display = 'none';
+                        statusDiv.textContent = '';
+                        statusDiv.className = 'status-indicator';
+                    }, 3000);
+                }
+            }
+        }
+
+        // Cleanup on page close
+        window.addEventListener('beforeunload', () => {
+            // Stop recording if active
+            if (isRecording) {
+                stopRecording();
+            }
+            
+            // Clear connecting timeout
+            if (connectingTimeout) {
+                clearTimeout(connectingTimeout);
+                connectingTimeout = null;
+            }
+            
+            // Disconnect WebSocket
+            if (socket) {
+                socket.disconnect();
+                socket = null;
+            }
+            
+            // Cancel reconnection if scheduled
+            if (reconnectTimeout) {
+                clearTimeout(reconnectTimeout);
+                reconnectTimeout = null;
+            }
+            isReconnecting = false;
+            
+            // Disconnect WebSocket
+            disconnectWebSocket();
+            
+            // Close WebRTC connection
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            if (videoPlayer && videoPlayer.srcObject) {
+                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
+                videoPlayer.srcObject = null;
+                videoPlayer.style.display = 'none';
+            }
+            // Show static image
+            if (staticImage) {
+                staticImage.style.display = 'block';
+            }
+            
+            // Stop audio stream
+            if (audioStream) {
+                audioStream.getTracks().forEach(track => track.stop());
+                audioStream = null;
+            }
+        });
+    </script>
+</body>
+</html>

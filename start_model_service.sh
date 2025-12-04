@@ -82,7 +82,8 @@ echo "Лог файл: $log_file"
 echo "PID файл: $pid_file"
 
 # Запуск демон-сервиса в фоне
-nohup python3 -m scripts.model_daemon_service \
+# Используем -u для unbuffered output, чтобы логи сразу попадали в файл
+nohup python3 -u -m scripts.model_daemon_service \
     --version "$version_arg" \
     --gpu_id "$gpu_id" \
     --use_float16 \
