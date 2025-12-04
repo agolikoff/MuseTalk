@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MuseTalk Streaming Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #333;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .stop-btn {
+            background-color: #f44336;
+        }
+        .stop-btn:hover {
+            background-color: #da190b;
+        }
+        #video-container {
+            margin-top: 20px;
+            text-align: center;
+        }
+        video {
+            max-width: 100%;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            background: #000;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        .status.info {
+            background-color: #e3f2fd;
+            color: #1976d2;
+        }
+        .status.success {
+            background-color: #e8f5e9;
+            color: #388e3c;
+        }
+        .status.error {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+        .log {
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 2px 0;
+        }
+        .log-entry.error {
+            color: #c62828;
+        }
+        .log-entry.success {
+            color: #388e3c;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>MuseTalk Streaming Test</h1>
+        
+        <form id="streamForm">
+            <div class="form-group">
+                <label for="taskId">Task ID (имя аватара):</label>
+                <input type="text" id="taskId" value="couch_1" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="videoPath">Путь к видео файлу:</label>
+                <input type="text" id="videoPath" value="data/video/couch_1.mp4" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="audioPath">Путь к аудио файлу:</label>
+                <input type="text" id="audioPath" value="data/audio/test.wav" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="version">Версия модели:</label>
+                <select id="version">
+                    <option value="v15" selected>v1.5</option>
+                    <option value="v1">v1.0</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="fps">FPS:</label>
+                <input type="number" id="fps" value="25" min="1" max="60">
+            </div>
+            
+            <div class="form-group">
+                <label for="batchSize">Batch Size:</label>
+                <input type="number" id="batchSize" value="8" min="1" max="32">
+            </div>
+            
+            <div class="form-group">
+                <label for="segmentDuration">Длительность сегмента (секунды):</label>
+                <input type="number" id="segmentDuration" value="2.0" min="0.5" max="10" step="0.5">
+            </div>
+            
+            <div class="form-group">
+                <label for="wsUrl">WebSocket URL:</label>
+                <input type="text" id="wsUrl" value="ws://51.250.22.55:8001/ws/stream">
+            </div>
+            
+            <button type="submit" id="startBtn">Начать стриминг</button>
+            <button type="button" id="stopBtn" class="stop-btn" disabled>Остановить</button>
+        </form>
+        
+        <div id="status" class="status info" style="display: none;"></div>
+        
+        <div id="video-container" style="display: none;">
+            <video id="videoPlayer" controls autoplay></video>
+        </div>
+        
+        <div class="log" id="log"></div>
+    </div>
+
+    <script>
+        let ws = null;
+        let mediaSource = null;
+        let sourceBuffer = null;
+        let segmentQueue = [];
+        let isAppending = false;
+        let receivedSegments = 0;
+        let segmentsInBuffer = 0;
+        let playbackStarted = false;
+
+        const form = document.getElementById('streamForm');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusDiv = document.getElementById('status');
+        const videoContainer = document.getElementById('video-container');
+        const videoPlayer = document.getElementById('videoPlayer');
+        const logDiv = document.getElementById('log');
+
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(message);
+        }
+
+        function setStatus(message, type = 'info') {
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+            statusDiv.style.display = 'block';
+        }
+
+        function initMediaSource() {
+            // Используем MP4 для лучшей совместимости
+            const mimeType = 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
+            
+            if (MediaSource.isTypeSupported(mimeType)) {
+                mediaSource = new MediaSource();
+                videoPlayer.src = URL.createObjectURL(mediaSource);
+                
+                // Отключаем автовоспроизведение - будем запускать вручную после буферизации
+                videoPlayer.autoplay = false;
+                
+                mediaSource.addEventListener('sourceopen', () => {
+                    try {
+                        sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+                        sourceBuffer.addEventListener('updateend', () => {
+                            isAppending = false;
+                            segmentsInBuffer++;
+                            log(`Сегментов в буфере: ${segmentsInBuffer}`, 'info');
+                            
+                            // Если получили второй сегмент и еще не начали воспроизведение
+                            if (segmentsInBuffer >= 2 && !playbackStarted) {
+                                startPlayback();
+                            }
+                            
+                            appendNextSegment();
+                        });
+                        sourceBuffer.addEventListener('error', (e) => {
+                            log(`Ошибка SourceBuffer: ${e}`, 'error');
+                            console.error('SourceBuffer error details:', e);
+                            isAppending = false;
+                        });
+                        log('MediaSource инициализирован', 'success');
+                    } catch (e) {
+                        log(`Ошибка при создании SourceBuffer: ${e}`, 'error');
+                    }
+                });
+                
+                // Отслеживаем воспроизведение видео
+                videoPlayer.addEventListener('timeupdate', () => {
+                    const currentTime = videoPlayer.currentTime;
+                    const duration = videoPlayer.duration;
+                    
+                    // Если видео близко к концу буфера, проверяем есть ли еще данные
+                    if (sourceBuffer && sourceBuffer.buffered.length > 0) {
+                        const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                        const timeUntilEnd = bufferedEnd - currentTime;
+                        
+                        // Если осталось меньше 1 секунды буфера и есть сегменты в очереди
+                        if (timeUntilEnd < 1.0 && segmentQueue.length > 0 && !isAppending) {
+                            log(`Мало буфера (${timeUntilEnd.toFixed(2)}s), добавляем сегменты...`, 'info');
+                            appendNextSegment();
+                        }
+                    }
+                });
+                
+                videoPlayer.addEventListener('waiting', () => {
+                    log('Видео ожидает данных (waiting)', 'error');
+                    // Пытаемся добавить сегменты если они есть
+                    if (segmentQueue.length > 0 && !isAppending) {
+                        appendNextSegment();
+                    }
+                });
+                
+                videoPlayer.addEventListener('stalled', () => {
+                    log('Видео остановилось (stalled)', 'error');
+                });
+                
+                mediaSource.addEventListener('error', (e) => {
+                    log(`Ошибка MediaSource: ${e}`, 'error');
+                });
+            } else {
+                log(`MP4 с H.264/AAC не поддерживается браузером. MIME type: ${mimeType}`, 'error');
+                setStatus('Ваш браузер не поддерживает MP4 с H.264/AAC', 'error');
+            }
+        }
+        
+        function startPlayback() {
+            if (playbackStarted) {
+                return;
+            }
+            
+            playbackStarted = true;
+            log('Начало воспроизведения (получено минимум 2 сегмента)', 'success');
+            setStatus('Начало воспроизведения...', 'success');
+            
+            // Запускаем воспроизведение
+            videoPlayer.play().then(() => {
+                log('Воспроизведение запущено', 'success');
+            }).catch((e) => {
+                log(`Ошибка при запуске воспроизведения: ${e}`, 'error');
+                // Пробуем еще раз через небольшую задержку
+                setTimeout(() => {
+                    videoPlayer.play().catch(err => {
+                        log(`Повторная ошибка при запуске воспроизведения: ${err}`, 'error');
+                    });
+                }, 500);
+            });
+        }
+
+        function appendNextSegment() {
+            if (isAppending || segmentQueue.length === 0 || !sourceBuffer) {
+                return;
+            }
+
+            if (sourceBuffer.updating) {
+                return;
+            }
+
+            // Проверяем готовность MediaSource
+            if (mediaSource.readyState !== 'open') {
+                log(`MediaSource не готов: ${mediaSource.readyState}`, 'error');
+                return;
+            }
+
+            // Пропускаем init сегменты - они уже добавлены
+            let segment = null;
+            let segmentIndex = -1;
+            for (let i = 0; i < segmentQueue.length; i++) {
+                if (!segmentQueue[i].isInit) {
+                    segment = segmentQueue[i];
+                    segmentIndex = i;
+                    break;
+                }
+            }
+            
+            if (!segment) {
+                return;
+            }
+
+            try {
+                isAppending = true;
+                const uint8Array = new Uint8Array(segment.data);
+                
+                // Добавляем сегмент в буфер
+                sourceBuffer.appendBuffer(uint8Array);
+                segmentQueue.shift(); // Удаляем из очереди только после успешного добавления
+                
+                // Логируем состояние буфера
+                if (sourceBuffer.buffered.length > 0) {
+                    const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                    const bufferedStart = sourceBuffer.buffered.start(0);
+                    log(`Сегмент ${segment.index} добавлен. Буфер: ${bufferedStart.toFixed(2)}s - ${bufferedEnd.toFixed(2)}s (${(bufferedEnd - bufferedStart).toFixed(2)}s)`, 'success');
+                    
+                    // Проверяем, не останавливается ли видео
+                    if (videoPlayer.paused && playbackStarted) {
+                        log('Видео остановилось, пытаемся возобновить...', 'error');
+                        videoPlayer.play().catch(e => {
+                            log(`Ошибка при возобновлении воспроизведения: ${e}`, 'error');
+                        });
+                    }
+                } else {
+                    log(`Сегмент ${segment.index} добавлен в буфер (${segment.startTime.toFixed(2)}s - ${segment.endTime.toFixed(2)}s)`, 'success');
+                }
+            } catch (e) {
+                log(`Ошибка при добавлении сегмента ${segment.index}: ${e.message || e}`, 'error');
+                console.error('Детали ошибки:', e);
+                console.error('Segment data length:', segment.data.length);
+                isAppending = false;
+                // Пытаемся продолжить со следующим сегментом через небольшую задержку
+                setTimeout(() => {
+                    if (segmentQueue.length > segmentIndex && segmentQueue[segmentIndex] && segmentQueue[segmentIndex].index === segment.index) {
+                        // Если тот же сегмент все еще в очереди, пропускаем его
+                        segmentQueue.splice(segmentIndex, 1);
+                        log(`Пропущен проблемный сегмент ${segment.index}`, 'error');
+                    }
+                    appendNextSegment();
+                }, 100);
+            }
+        }
+
+        // Обработчик updateend будет добавлен после создания sourceBuffer
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            startStreaming();
+        });
+
+        stopBtn.addEventListener('click', () => {
+            stopStreaming();
+        });
+
+        function startStreaming() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log('Стриминг уже запущен', 'error');
+                return;
+            }
+
+            const taskId = document.getElementById('taskId').value;
+            const videoPath = document.getElementById('videoPath').value;
+            const audioPath = document.getElementById('audioPath').value;
+            const version = document.getElementById('version').value;
+            const fps = parseInt(document.getElementById('fps').value);
+            const batchSize = parseInt(document.getElementById('batchSize').value);
+            const segmentDuration = parseFloat(document.getElementById('segmentDuration').value);
+            const wsUrl = document.getElementById('wsUrl').value;
+
+            // Инициализируем MediaSource
+            initMediaSource();
+            segmentQueue = [];
+            receivedSegments = 0;
+            segmentsInBuffer = 0;
+            isAppending = false;
+            playbackStarted = false;
+
+            // Создаем WebSocket соединение
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                log('WebSocket соединение установлено', 'success');
+                setStatus('Подключено. Отправка параметров...', 'info');
+                
+                // Отправляем параметры
+                const params = {
+                    task_id: taskId,
+                    video_path: videoPath,
+                    audio_path: audioPath,
+                    version: version,
+                    fps: fps,
+                    batch_size: batchSize,
+                    segment_duration_seconds: segmentDuration
+                };
+                
+                ws.send(JSON.stringify(params));
+                log('Параметры отправлены', 'success');
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const message = JSON.parse(event.data);
+                    
+                    if (message.type === 'started') {
+                        setStatus('Генерация начата. Ожидание буферизации...', 'info');
+                        log('Генерация начата. Ожидание минимум 2 сегментов перед воспроизведением', 'success');
+                        videoContainer.style.display = 'block';
+                    }
+                    else if (message.type === 'segment') {
+                        const isInit = message.is_init || false;
+                        const segmentIndex = message.segment_index;
+                        
+                        if (isInit) {
+                            log(`Получен INIT сегмент`, 'success');
+                        } else {
+                            receivedSegments++;
+                            log(`Получен сегмент ${segmentIndex} (${message.start_time.toFixed(2)}s - ${message.end_time.toFixed(2)}s)`, 'success');
+                        }
+                        
+                        // Декодируем base64
+                        const binaryString = atob(message.data);
+                        const bytes = new Uint8Array(binaryString.length);
+                        for (let i = 0; i < binaryString.length; i++) {
+                            bytes[i] = binaryString.charCodeAt(i);
+                        }
+                        
+                        // Если это init сегмент, добавляем его сразу в буфер
+                        if (isInit) {
+                            log('Init сегмент получен', 'success');
+                            if (sourceBuffer && !sourceBuffer.updating && mediaSource.readyState === 'open') {
+                                try {
+                                    sourceBuffer.appendBuffer(bytes);
+                                    log('Init сегмент добавлен в буфер', 'success');
+                                } catch (e) {
+                                    log(`Ошибка при добавлении init сегмента: ${e}`, 'error');
+                                    console.error('Init segment error:', e);
+                                    // Сохраняем для добавления позже
+                                    segmentQueue.unshift({
+                                        index: -1,
+                                        data: bytes,
+                                        startTime: 0,
+                                        endTime: 0,
+                                        isInit: true
+                                    });
+                                }
+                            } else {
+                                // Сохраняем для добавления позже
+                                segmentQueue.unshift({
+                                    index: -1,
+                                    data: bytes,
+                                    startTime: 0,
+                                    endTime: 0,
+                                    isInit: true
+                                });
+                            }
+                        } else {
+                            // Добавляем медиа сегменты в очередь
+                            segmentQueue.push({
+                                index: segmentIndex,
+                                data: bytes,
+                                startTime: message.start_time,
+                                endTime: message.end_time,
+                                isInit: false
+                            });
+                            
+                            // Сортируем очередь по индексу
+                            segmentQueue.sort((a, b) => {
+                                if (a.isInit) return -1;
+                                if (b.isInit) return 1;
+                                return a.index - b.index;
+                            });
+                        }
+                        
+                        setStatus(`Получено сегментов: ${receivedSegments}${isInit ? ' + INIT' : ''}`, 'info');
+                        
+                        // Пытаемся добавить следующий сегмент
+                        appendNextSegment();
+                    }
+                    else if (message.type === 'completed') {
+                        setStatus('Генерация завершена. Ожидание добавления всех сегментов...', 'info');
+                        log('Генерация завершена', 'success');
+                        
+                        // НЕ закрываем MediaSource сразу - ждем пока все сегменты добавятся
+                        // endOfStream будет вызван только когда все сегменты в буфере
+                        const checkBuffer = setInterval(() => {
+                            if (segmentQueue.length === 0 && !isAppending && sourceBuffer && !sourceBuffer.updating) {
+                                clearInterval(checkBuffer);
+                                
+                                // Ждем еще немного, чтобы убедиться что все добавлено
+                                setTimeout(() => {
+                                    // Закрываем MediaSource только после того, как все сегменты добавлены
+                                    if (mediaSource && mediaSource.readyState === 'open') {
+                                        try {
+                                            // Проверяем буфер перед закрытием
+                                            if (sourceBuffer.buffered.length > 0) {
+                                                const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                                                const bufferedStart = sourceBuffer.buffered.start(0);
+                                                log(`Буфер перед закрытием: ${bufferedStart.toFixed(2)}s - ${bufferedEnd.toFixed(2)}s (${(bufferedEnd - bufferedStart).toFixed(2)}s)`, 'info');
+                                                
+                                                // НЕ вызываем endOfStream - пусть видео продолжает воспроизводиться
+                                                // endOfStream() заставит видео остановиться
+                                                // mediaSource.endOfStream();
+                                                log('Все сегменты добавлены. Видео продолжает воспроизведение.', 'success');
+                                            }
+                                        } catch (e) {
+                                            log(`Ошибка при проверке буфера: ${e}`, 'error');
+                                        }
+                                    }
+                                    
+                                    startBtn.disabled = false;
+                                    stopBtn.disabled = true;
+                                }, 500);
+                            }
+                        }, 100);
+                        
+                        // Таймаут на случай, если что-то пошло не так
+                        setTimeout(() => {
+                            clearInterval(checkBuffer);
+                            log('Таймаут проверки буфера', 'info');
+                        }, 10000);
+                    }
+                    else if (message.type === 'error') {
+                        setStatus(`Ошибка: ${message.message}`, 'error');
+                        log(`Ошибка: ${message.message}`, 'error');
+                        startBtn.disabled = false;
+                        stopBtn.disabled = true;
+                    }
+                } catch (e) {
+                    log(`Ошибка при обработке сообщения: ${e}`, 'error');
+                }
+            };
+
+            ws.onerror = (error) => {
+                log(`WebSocket ошибка: ${error}`, 'error');
+                setStatus('Ошибка WebSocket соединения', 'error');
+            };
+
+            ws.onclose = () => {
+                log('WebSocket соединение закрыто', 'info');
+                setStatus('Соединение закрыто', 'info');
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            };
+
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+        }
+
+        function stopStreaming() {
+            if (ws) {
+                ws.send(JSON.stringify({ type: 'stop' }));
+                ws.close();
+                ws = null;
+            }
+            
+            if (mediaSource && mediaSource.readyState === 'open') {
+                try {
+                    mediaSource.endOfStream();
+                } catch (e) {
+                    log(`Ошибка при закрытии MediaSource: ${e}`, 'error');
+                }
+            }
+            
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            setStatus('Стриминг остановлен', 'info');
+            log('Стриминг остановлен', 'info');
+        }
+    </script>
+</body>
+</html>
+

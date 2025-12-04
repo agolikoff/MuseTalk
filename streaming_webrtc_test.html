@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MuseTalk WebRTC Streaming Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #333;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .stop-btn {
+            background-color: #f44336;
+        }
+        .stop-btn:hover {
+            background-color: #da190b;
+        }
+        .restart-btn {
+            background-color: #2196F3;
+        }
+        .restart-btn:hover {
+            background-color: #0b7dda;
+        }
+        #video-container {
+            margin-top: 20px;
+            text-align: center;
+        }
+        video {
+            max-width: 100%;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            background: #000;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        .status.info {
+            background-color: #e3f2fd;
+            color: #1976d2;
+        }
+        .status.success {
+            background-color: #e8f5e9;
+            color: #388e3c;
+        }
+        .status.error {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+        .log {
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 2px 0;
+        }
+        .log-entry.error {
+            color: #c62828;
+        }
+        .log-entry.success {
+            color: #388e3c;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>MuseTalk WebRTC Streaming Test</h1>
+        
+        <form id="streamForm">
+            <div class="form-group">
+                <label for="taskId">Task ID (avatar name):</label>
+                <input type="text" id="taskId" value="couch_ashley" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="videoPath">Video file path:</label>
+                <input type="text" id="videoPath" value="data/video/couch_ashley.mp4" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="audioPath">Audio file path:</label>
+                <input type="text" id="audioPath" value="data/audio/test.wav" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="version">Model version:</label>
+                <select id="version">
+                    <option value="v15" selected>v1.5</option>
+                    <option value="v1">v1.0</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="fps">FPS:</label>
+                <input type="number" id="fps" value="15" min="1" max="60">
+            </div>
+            
+            <div class="form-group">
+                <label for="batchSize">Batch Size:</label>
+                <input type="number" id="batchSize" value="8" min="1" max="32">
+            </div>
+            
+            <div class="form-group">
+                <label for="apiUrl">API URL:</label>
+                <input type="text" id="apiUrl" value="http://34.135.136.47:8009">
+            </div>
+            
+            <div class="form-group">
+                <label for="turnServerUrl">TURN Server URL (optional, if server provides its own TURN):</label>
+                <input type="text" id="turnServerUrl" placeholder="turn:34.135.136.47:3478" value="">
+            </div>
+            
+            <div class="form-group">
+                <label for="turnUsername">TURN Username (optional):</label>
+                <input type="text" id="turnUsername" placeholder="webrtc" value="webrtc">
+            </div>
+            
+            <div class="form-group">
+                <label for="turnCredential">TURN Credential (optional):</label>
+                <input type="password" id="turnCredential" placeholder="password" value="my_password">
+            </div>
+            
+            <button type="submit" id="startBtn">Start Streaming</button>
+            <button type="button" id="stopBtn" class="stop-btn" disabled>Stop</button>
+            <button type="button" id="restartBtn" class="restart-btn" disabled>Start Generation</button>
+        </form>
+        
+        <div id="status" class="status info" style="display: none;"></div>
+        
+        <div id="video-container" style="display: none;">
+            <video id="videoPlayer" autoplay playsinline></video>
+        </div>
+        
+        <div class="log" id="log"></div>
+    </div>
+
+    <script>
+        let pc = null;
+        let localStream = null;
+        let reconnectAttempts = 0;
+        let maxReconnectAttempts = 3;
+        let reconnectTimeout = null;
+        let isReconnecting = false;
+
+        const form = document.getElementById('streamForm');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const restartBtn = document.getElementById('restartBtn');
+        const statusDiv = document.getElementById('status');
+        const videoContainer = document.getElementById('video-container');
+        const videoPlayer = document.getElementById('videoPlayer');
+        const logDiv = document.getElementById('log');
+        
+        let currentTaskId = null;  // Save current task_id for restart
+
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(message);
+        }
+
+        function setStatus(message, type = 'info') {
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+            statusDiv.style.display = 'block';
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await startStreaming();
+        });
+
+        stopBtn.addEventListener('click', () => {
+            stopStreaming();
+        });
+
+        restartBtn.addEventListener('click', () => {
+            restartGeneration();
+        });
+
+        async function startStreaming() {
+            if (pc && !isReconnecting) {
+                log('Streaming already started', 'error');
+                return;
+            }
+            
+            // If reconnecting, reset flag after starting new connection
+            if (isReconnecting) {
+                isReconnecting = false;
+            }
+
+                const taskId = document.getElementById('taskId').value;
+                currentTaskId = taskId;  // Save task_id for restart
+                const videoPath = document.getElementById('videoPath').value;
+                const audioPath = document.getElementById('audioPath').value;
+                const version = document.getElementById('version').value;
+                const fps = parseInt(document.getElementById('fps').value);
+                const batchSize = parseInt(document.getElementById('batchSize').value);
+                const apiUrl = document.getElementById('apiUrl').value;
+                const turnServerUrl = document.getElementById('turnServerUrl').value;
+                const turnUsername = document.getElementById('turnUsername').value;
+                const turnCredential = document.getElementById('turnCredential').value;
+
+            try {
+                // First, get TURN server information from server (if available)
+                // For this, you can make a preliminary request or use the same TURN server as the server
+                // For now, using public TURN servers, but will update configuration when receiving answer
+                
+                // Basic ICE servers
+                const iceServers = [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' }
+                ];
+                
+                // Add TURN server if specified in form (priority)
+                if (turnServerUrl && turnUsername && turnCredential) {
+                    const turnUrls = [turnServerUrl];
+                    if (!turnServerUrl.includes('?transport=')) {
+                        turnUrls.push(`${turnServerUrl}?transport=tcp`);
+                    }
+                    iceServers.push({
+                        urls: turnUrls,
+                        username: turnUsername,
+                        credential: turnCredential
+                    });
+                    log(`Using TURN server from form: ${turnServerUrl}`, 'info');
+                } else {
+                    // Use public TURN servers as fallback
+                    iceServers.push(
+                        {
+                            urls: [
+                                'turn:openrelay.metered.ca:80',
+                                'turn:openrelay.metered.ca:443',
+                                'turn:openrelay.metered.ca:443?transport=tcp'
+                            ],
+                            username: 'openrelayproject',
+                            credential: 'openrelayproject'
+                        },
+                        {
+                            urls: [
+                                'turn:relay.metered.ca:80',
+                                'turn:relay.metered.ca:443',
+                                'turn:relay.metered.ca:443?transport=tcp'
+                            ],
+                            username: 'openrelayproject',
+                            credential: 'openrelayproject'
+                        }
+                    );
+                    log('Using public TURN servers (fallback)', 'info');
+                }
+                
+                // Create RTCPeerConnection
+                pc = new RTCPeerConnection({
+                    iceServers: iceServers,
+                    // ICE settings for better compatibility
+                    iceCandidatePoolSize: 10
+                });
+                
+                const stunCount = iceServers.filter(s => {
+                    const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+                    return urls.some(u => u.includes('stun'));
+                }).length;
+                const turnCount = iceServers.filter(s => {
+                    const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+                    return urls.some(u => u.includes('turn'));
+                }).length;
+                log(`ICE servers configured: ${iceServers.length} (${stunCount} STUN + ${turnCount} TURN)`, 'info');
+
+                // Event handlers
+                pc.oniceconnectionstatechange = () => {
+                    log(`ICE connection: ${pc.iceConnectionState}`, 'info');
+                    if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+                        log('Connection lost', 'error');
+                        // Try to restore connection if attempt limit not exceeded
+                        if (!isReconnecting && reconnectAttempts < maxReconnectAttempts) {
+                            attemptReconnect();
+                        } else if (reconnectAttempts >= maxReconnectAttempts) {
+                            log(`Reconnection attempt limit reached (${maxReconnectAttempts})`, 'error');
+                            setStatus('Connection lost. Reconnection attempt limit reached.', 'error');
+                        }
+                    } else if (pc.iceConnectionState === 'connected') {
+                        // Connection restored, reset attempt counter
+                        reconnectAttempts = 0;
+                        isReconnecting = false;
+                        if (reconnectTimeout) {
+                            clearTimeout(reconnectTimeout);
+                            reconnectTimeout = null;
+                        }
+                        log('Connection restored', 'success');
+                    }
+                };
+
+                pc.onicegatheringstatechange = () => {
+                    log(`ICE gathering: ${pc.iceGatheringState}`, 'info');
+                };
+
+                // Log ICE candidates for diagnostics
+                pc.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        const candidate = event.candidate;
+                        log(`ICE candidate: ${candidate.type} ${candidate.protocol} ${candidate.address}:${candidate.port}`, 'info');
+                        if (candidate.type === 'relay') {
+                            log('✓ TURN server is being used! Relay candidate found', 'success');
+                        }
+                    } else {
+                        log('ICE gathering completed (all candidates collected)', 'info');
+                    }
+                };
+
+                pc.onconnectionstatechange = () => {
+                    log(`Connection state: ${pc.connectionState}`, 'info');
+                    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+                        // Try to restore connection
+                        if (!isReconnecting && reconnectAttempts < maxReconnectAttempts) {
+                            attemptReconnect();
+                        }
+                    } else if (pc.connectionState === 'connected') {
+                        // Connection restored
+                        reconnectAttempts = 0;
+                        isReconnecting = false;
+                        if (reconnectTimeout) {
+                            clearTimeout(reconnectTimeout);
+                            reconnectTimeout = null;
+                        }
+                    }
+                };
+
+                pc.ontrack = (event) => {
+                    log(`Media stream received: ${event.track.kind}, id=${event.track.id}, enabled=${event.track.enabled}`, 'success');
+                    if (event.track.kind === 'video') {
+                        log(`Video track: readyState=${event.track.readyState}, muted=${event.track.muted}`, 'info');
+                        videoPlayer.srcObject = event.streams[0];
+                        videoContainer.style.display = 'block';
+                        setStatus('Video stream received', 'success');
+                        
+                        // Add handlers for video element
+                        videoPlayer.onloadedmetadata = () => {
+                            log(`Video metadata loaded: ${videoPlayer.videoWidth}x${videoPlayer.videoHeight}`, 'success');
+                        };
+                        
+                        videoPlayer.onplay = () => {
+                            log('Video playback started', 'success');
+                        };
+                        
+                        videoPlayer.onerror = (e) => {
+                            log(`Video error: ${e}`, 'error');
+                        };
+                    }
+                };
+
+                // IMPORTANT: Add transceivers for receiving video and audio BEFORE creating offer
+                // This is necessary for correct configuration of media stream directions in SDP
+                pc.addTransceiver('video', { direction: 'recvonly' });
+                pc.addTransceiver('audio', { direction: 'recvonly' });
+                log('Transceivers for receiving video and audio added', 'info');
+
+                // Create offer
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                log('Sending offer to server...', 'info');
+                
+                // Send offer to server
+                const response = await fetch(`${apiUrl}/api/webrtc/offer`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        sdp: offer.sdp,
+                        type: offer.type,
+                        task_id: taskId,
+                        video_path: videoPath,
+                        audio_path: audioPath,
+                        version: version,
+                        fps: fps,
+                        batch_size: batchSize
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Server error');
+                }
+
+                const answerData = await response.json();
+                log('Answer received from server', 'success');
+
+                // If server provided TURN server information, display it
+                if (answerData.turn_server) {
+                    log(`✓ Server provided TURN server: ${answerData.turn_server.url}`, 'success');
+                    log(`For next connection, use this TURN server in form:`, 'info');
+                    log(`  URL: ${answerData.turn_server.url}`, 'info');
+                    log(`  Username: ${answerData.turn_server.username}`, 'info');
+                    // Automatically fill form for next use
+                    document.getElementById('turnServerUrl').value = answerData.turn_server.url;
+                    document.getElementById('turnUsername').value = answerData.turn_server.username;
+                    document.getElementById('turnCredential').value = answerData.turn_server.credential;
+                    log('Form automatically filled for next connection', 'info');
+                }
+
+                // Set remote description
+                await pc.setRemoteDescription(new RTCSessionDescription(answerData));
+                log('WebRTC connection established', 'success');
+                
+                // Wait for ICE candidates
+                await new Promise((resolve) => {
+                    if (pc.iceGatheringState === 'complete') {
+                        resolve();
+                    } else {
+                        pc.onicegatheringstatechange = () => {
+                            if (pc.iceGatheringState === 'complete') {
+                                log('ICE gathering completed', 'info');
+                                resolve();
+                            }
+                        };
+                    }
+                });
+                
+                // Check transceivers
+                const transceivers = pc.getTransceivers();
+                log(`Transceivers: ${transceivers.length}`, 'info');
+                transceivers.forEach((transceiver, idx) => {
+                    log(`Transceiver ${idx}: kind=${transceiver.receiver.track?.kind}, direction=${transceiver.direction}, currentDirection=${transceiver.currentDirection}`, 'info');
+                });
+                
+                setStatus('Streaming started', 'success');
+                
+                // Reset reconnection counter on successful start
+                reconnectAttempts = 0;
+                isReconnecting = false;
+
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                restartBtn.disabled = false;
+
+            } catch (e) {
+                log(`Error starting streaming: ${e}`, 'error');
+                setStatus(`Error: ${e.message}`, 'error');
+                if (pc) {
+                    pc.close();
+                    pc = null;
+                }
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+                restartBtn.disabled = true;
+            }
+        }
+
+        function stopStreaming() {
+            // Cancel reconnection if it was scheduled
+            if (reconnectTimeout) {
+                clearTimeout(reconnectTimeout);
+                reconnectTimeout = null;
+            }
+            isReconnecting = false;
+            reconnectAttempts = 0;
+            
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            
+            if (videoPlayer.srcObject) {
+                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
+                videoPlayer.srcObject = null;
+            }
+            
+            currentTaskId = null;  // Reset task_id
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            restartBtn.disabled = true;
+            setStatus('Streaming stopped', 'info');
+            log('Streaming stopped', 'info');
+        }
+        
+        async function restartGeneration() {
+            if (!currentTaskId) {
+                log('No active connection to start generation', 'error');
+                setStatus('Error: no active connection', 'error');
+                return;
+            }
+            
+            if (!pc || (pc.iceConnectionState !== 'connected' && pc.connectionState !== 'connected')) {
+                log('WebRTC connection not active, cannot start generation', 'error');
+                setStatus('Error: WebRTC connection not active', 'error');
+                return;
+            }
+            
+            const apiUrl = document.getElementById('apiUrl').value;
+            
+            try {
+                restartBtn.disabled = true;
+                log('Starting video generation...', 'info');
+                setStatus('Starting generation...', 'info');
+                
+                const response = await fetch(`${apiUrl}/api/webrtc/restart_generation`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        task_id: currentTaskId
+                    })
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Server error');
+                }
+                
+                const result = await response.json();
+                const action = result.was_running ? 'restarted' : 'started';
+                log(`Generation ${action}: ${result.message}`, 'success');
+                setStatus(`Generation ${action}`, 'success');
+                restartBtn.disabled = false;
+            } catch (e) {
+                log(`Error starting generation: ${e}`, 'error');
+                setStatus(`Error: ${e.message}`, 'error');
+                restartBtn.disabled = false;
+            }
+        }
+        
+        async function attemptReconnect() {
+            if (isReconnecting) {
+                return; // Reconnection already in progress
+            }
+            
+            isReconnecting = true;
+            reconnectAttempts++;
+            
+            log(`Reconnection attempt ${reconnectAttempts}/${maxReconnectAttempts}...`, 'info');
+            setStatus(`Reconnection attempt ${reconnectAttempts}/${maxReconnectAttempts}...`, 'info');
+            
+            // Close current connection
+            if (pc) {
+                try {
+                    pc.close();
+                } catch (e) {
+                    log(`Error closing connection: ${e}`, 'error');
+                }
+                pc = null;
+            }
+            
+            // Wait before reconnection (exponential delay)
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000); // Maximum 10 seconds
+            log(`Waiting ${delay}ms before reconnection...`, 'info');
+            
+            reconnectTimeout = setTimeout(async () => {
+                try {
+                    await startStreaming();
+                    log('Reconnection successful', 'success');
+                } catch (e) {
+                    log(`Error during reconnection: ${e}`, 'error');
+                    if (reconnectAttempts < maxReconnectAttempts) {
+                        isReconnecting = false; // Allow next attempt
+                        attemptReconnect(); // Try again
+                    } else {
+                        isReconnecting = false;
+                        setStatus('Failed to restore connection after all attempts', 'error');
+                    }
+                }
+            }, delay);
+        }
+    </script>
+</body>
+</html>
+

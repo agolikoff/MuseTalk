@@ -93,16 +93,34 @@ class VAE():
         init_latents = self.scaling_factor * init_latent_dist.sample()
         return init_latents
     
-    def decode_latents(self, latents):
+    def decode_latents(self, latents, max_batch_size=None):
         """
         Decode latent variables back into an image.
         :param latents: The latent variables to decode.
+        :param max_batch_size: Maximum batch size for decoding. If None, processes all at once.
         :return: A NumPy array representing the decoded image.
         """
         latents = (1/  self.scaling_factor) * latents
-        image = self.vae.decode(latents.to(self.vae.dtype)).sample
-        image = (image / 2 + 0.5).clamp(0, 1)
-        image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+        
+        # Если указан max_batch_size и батч больше, обрабатываем подбатчами
+        if max_batch_size is not None and latents.shape[0] > max_batch_size:
+            images = []
+            for i in range(0, latents.shape[0], max_batch_size):
+                sub_latents = latents[i:i+max_batch_size]
+                sub_image = self.vae.decode(sub_latents.to(self.vae.dtype)).sample
+                sub_image = (sub_image / 2 + 0.5).clamp(0, 1)
+                sub_image = sub_image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+                images.append(sub_image)
+                # Освобождаем промежуточные тензоры
+                del sub_latents, sub_image
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            image = np.concatenate(images, axis=0)
+        else:
+            image = self.vae.decode(latents.to(self.vae.dtype)).sample
+            image = (image / 2 + 0.5).clamp(0, 1)
+            image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+        
         image = (image * 255).round().astype("uint8")
         image = image[...,::-1] # RGB to BGR
         return image

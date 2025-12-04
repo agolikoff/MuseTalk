@@ -31,6 +31,8 @@ import glob
 import pickle
 import numpy as np
 from tqdm import tqdm
+import gc
+from scripts.mmap_frame_buffer import MmapFrameWriter, get_mmap_path
 
 
 def fast_check_ffmpeg():
@@ -66,7 +68,8 @@ class ModelDaemonService:
                  whisper_dir="./models/whisper", vae_type="sd-vae",
                  ffmpeg_path="./ffmpeg-4.4-amd64-static/",
                  left_cheek_width=90, right_cheek_width=90,
-                 request_dir="./requests", result_dir="./results"):
+                 request_dir="./requests", result_dir="./results",
+                 skip_model_loading=False):
         self.version = version
         self.gpu_id = gpu_id
         self.use_float16 = use_float16
@@ -77,6 +80,7 @@ class ModelDaemonService:
         self.right_cheek_width = right_cheek_width
         self.request_dir = request_dir
         self.result_dir = result_dir
+        self.skip_model_loading = skip_model_loading
         
         # Создаем директории
         os.makedirs(request_dir, exist_ok=True)
@@ -117,10 +121,13 @@ class ModelDaemonService:
         # Ключ: task_id, значение: словарь с материалами
         self.avatar_cache = {}
         
-        print(f"[Daemon] Инициализация сервиса для версии {version}...")
-        self._load_models()
-        print("[Daemon] Все модели загружены в память!")
-        print(f"[Daemon] Сервис готов к обработке запросов из: {request_dir}")
+        print(f"[Daemon] Инициализация сервиса для версии {version}...", flush=True)
+        if skip_model_loading:
+            print("[Daemon] Пропуск загрузки моделей (skip_model_loading=True). Модели должны быть загружены в отдельном демоне.", flush=True)
+        else:
+            self._load_models()
+            print("[Daemon] Все модели загружены в память!", flush=True)
+        print(f"[Daemon] Сервис готов к обработке запросов из: {request_dir}", flush=True)
     
     def _load_models(self):
         """Загружает все модели в память"""
@@ -140,6 +147,16 @@ class ModelDaemonService:
         # Устройство
         device_start = time.perf_counter()
         self.device = torch.device(f"cuda:{self.gpu_id}" if torch.cuda.is_available() else "cpu")
+        
+        # Настройка CUDA allocator для уменьшения фрагментации памяти
+        if torch.cuda.is_available():
+            # Устанавливаем max_split_size_mb через переменную окружения, если не установлена
+            if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+                os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+                print(f"[Daemon] Установлена настройка PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 для уменьшения фрагментации памяти")
+            else:
+                print(f"[Daemon] Используется существующая настройка PYTORCH_CUDA_ALLOC_CONF={os.environ['PYTORCH_CUDA_ALLOC_CONF']}")
+        
         device_time = time.perf_counter() - device_start
         print(f"[Daemon] Используется устройство: {self.device} (время: {format_time(device_time)})")
         
@@ -153,12 +170,12 @@ class ModelDaemonService:
             device=self.device
         )
         models_time = time.perf_counter() - models_start
-        print(f"[Daemon] Загрузка VAE, UNet и PositionalEncoding: {format_time(models_time)}")
+        print(f"[Daemon] Загрузка VAE, UNet и PositionalEncoding: {format_time(models_time)}", flush=True)
         
         # Установка типа данных
         dtype_start = time.perf_counter()
         if self.use_float16:
-            print("[Daemon] Конвертация в float16...")
+            print("[Daemon] Конвертация в float16...", flush=True)
             self.pe = self.pe.half()
             self.vae.vae = self.vae.vae.half()
             self.unet.model = self.unet.model.half()
@@ -166,7 +183,7 @@ class ModelDaemonService:
         else:
             self.weight_dtype = torch.float32
         dtype_time = time.perf_counter() - dtype_start
-        print(f"[Daemon] Конвертация типа данных: {format_time(dtype_time)}")
+        print(f"[Daemon] Конвертация типа данных: {format_time(dtype_time)}", flush=True)
         
         # Перемещение на устройство
         move_start = time.perf_counter()
@@ -174,20 +191,20 @@ class ModelDaemonService:
         self.vae.vae = self.vae.vae.to(self.device)
         self.unet.model = self.unet.model.to(self.device)
         move_time = time.perf_counter() - move_start
-        print(f"[Daemon] Перемещение моделей на устройство: {format_time(move_time)}")
+        print(f"[Daemon] Перемещение моделей на устройство: {format_time(move_time)}", flush=True)
         
         # Загрузка Whisper
-        print("[Daemon] Загрузка Whisper модели...")
+        print("[Daemon] Загрузка Whisper модели...", flush=True)
         whisper_start = time.perf_counter()
         self.audio_processor = AudioProcessor(feature_extractor_path=self.whisper_dir)
         self.whisper = WhisperModel.from_pretrained(self.whisper_dir)
         self.whisper = self.whisper.to(device=self.device, dtype=self.weight_dtype).eval()
         self.whisper.requires_grad_(False)
         whisper_time = time.perf_counter() - whisper_start
-        print(f"[Daemon] Загрузка Whisper модели: {format_time(whisper_time)}")
+        print(f"[Daemon] Загрузка Whisper модели: {format_time(whisper_time)}", flush=True)
         
         # Загрузка FaceParser
-        print("[Daemon] Загрузка FaceParser...")
+        print("[Daemon] Загрузка FaceParser...", flush=True)
         fp_start = time.perf_counter()
         if self.version_arg == "v15":
             self.fp = FaceParsing(
@@ -203,7 +220,7 @@ class ModelDaemonService:
         self.timesteps = torch.tensor([0], device=self.device)
         
         total_time = time.perf_counter() - start_time
-        print(f"[Daemon] Все модели успешно загружены! Общее время загрузки: {format_time(total_time)}")
+        print(f"[Daemon] Все модели успешно загружены! Общее время загрузки: {format_time(total_time)}", flush=True)
     
     def _load_avatar_materials(self, task_id, avatar_base_path):
         """
@@ -304,6 +321,47 @@ class ModelDaemonService:
         
         return materials
     
+    def _clear_memory_and_reload_models(self):
+        """
+        Очищает всю память от заданий и перезагружает модели.
+        Вызывается при ошибке переполнения памяти CUDA.
+        """
+        print("[Daemon] ========================================")
+        print("[Daemon] ОБНАРУЖЕНА ОШИБКА ПЕРЕПОЛНЕНИЯ ПАМЯТИ!")
+        print("[Daemon] Начинаем очистку памяти и перезагрузку моделей...")
+        print("[Daemon] ========================================")
+        
+        # 1. Очищаем кеш аватаров
+        print("[Daemon] Очистка кеша аватаров...")
+        self.avatar_cache.clear()
+        
+        # 2. Удаляем ссылки на модели
+        print("[Daemon] Освобождение ссылок на модели...")
+        del self.vae
+        del self.unet
+        del self.pe
+        del self.whisper
+        del self.audio_processor
+        del self.fp
+        
+        # 3. Очищаем CUDA кеш
+        if torch.cuda.is_available():
+            print("[Daemon] Очистка CUDA кеша...")
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
+        # 4. Принудительная сборка мусора
+        print("[Daemon] Принудительная сборка мусора...")
+        gc.collect()
+        
+        # 5. Перезагружаем модели
+        print("[Daemon] Перезагрузка моделей...")
+        self._load_models()
+        
+        print("[Daemon] ========================================")
+        print("[Daemon] Очистка и перезагрузка завершены!")
+        print("[Daemon] ========================================")
+    
     def _process_frames_pipeline(self, res_frame_queue, video_len, coord_list_cycle, 
                                   frame_list_cycle, mask_list_cycle, mask_coords_list_cycle,
                                   coord_placeholder, result_img_save_path):
@@ -339,26 +397,305 @@ class ModelDaemonService:
             x1, y1, x2, y2 = bbox
             try:
                 res_frame = cv2.resize(res_frame.astype(np.uint8), (x2-x1, y2-y1))
+            except Exception as e:
+                print(f"[Daemon] Ошибка при изменении размера кадра {idx}: {e}")
+                idx += 1
+                continue
+            
+            try:
+                combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
+                if combine_frame is None:
+                    print(f"[Daemon] Предупреждение: combine_frame равен None для кадра {idx}")
+                    idx += 1
+                    continue
+                if not isinstance(combine_frame, np.ndarray):
+                    print(f"[Daemon] Предупреждение: combine_frame имеет неправильный тип {type(combine_frame)} для кадра {idx}")
+                    idx += 1
+                    continue
+                cv2.imwrite(f"{result_img_save_path}/{str(idx).zfill(8)}.png", combine_frame)
+            except Exception as e:
+                print(f"[Daemon] Ошибка при сохранении кадра {idx}: {e}")
+                import traceback
+                traceback.print_exc()
+            idx += 1
+    
+    def _process_frames_pipeline_webrtc_file(self, res_frame_queue, video_len, coord_list_cycle, 
+                                             frame_list_cycle, mask_list_cycle, mask_coords_list_cycle,
+                                             coord_placeholder, task_id, stop_flag=None):
+        """
+        Обрабатывает кадры из очереди и сохраняет их в mmap файл для WebRTC.
+        Вызывается в отдельном потоке для пайплайнинга.
+        
+        Args:
+            task_id: ID задачи для создания mmap файла
+            stop_flag: Флаг остановки генерации
+        """
+        idx = 0
+        empty_count = 0
+        max_empty_retries = 10
+        
+        # Определяем форму кадра из первого кадра (нужно для инициализации mmap)
+        # Берем форму из первого кадра в frame_list_cycle
+        if len(frame_list_cycle) == 0:
+            print("[Daemon] Ошибка: frame_list_cycle пуст")
+            return
+        
+        sample_frame = frame_list_cycle[0]
+        frame_shape = sample_frame.shape  # (height, width, channels)
+        
+        # Инициализируем mmap writer
+        mmap_writer = None
+        try:
+            mmap_writer = MmapFrameWriter(
+                task_id=task_id,
+                total_frames=video_len,
+                frame_shape=frame_shape,
+                frame_dtype=np.uint8
+            )
+            print(f"[Daemon] Инициализирован mmap writer для {task_id}: {frame_shape}, {video_len} кадров", flush=True)
+        except Exception as e:
+            print(f"[Daemon] Ошибка при инициализации mmap writer: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return
+        
+        try:
+            while idx < video_len:
+                # Проверяем флаг остановки
+                if stop_flag and stop_flag.is_set():
+                    print(f"[Daemon] Получен сигнал остановки, прерываем обработку кадров на индексе {idx}", flush=True)
+                    mmap_writer.set_stopped(idx)
+                    break
+                    
+                try:
+                    res_frame = res_frame_queue.get(block=True, timeout=1)
+                    empty_count = 0
+                except queue.Empty:
+                    empty_count += 1
+                    if empty_count >= max_empty_retries:
+                        print(f"[Daemon] Превышено количество пустых попыток, завершаем обработку", flush=True)
+                        break
+                    continue
+                
+                bbox = coord_list_cycle[idx % (len(coord_list_cycle))]
+                if bbox == coord_placeholder:
+                    idx += 1
+                    continue
+                
+                ori_frame = frame_list_cycle[idx % (len(frame_list_cycle))].copy()
+                mask = mask_list_cycle[idx % (len(mask_list_cycle))]
+                mask_crop_box = mask_coords_list_cycle[idx % (len(mask_coords_list_cycle))]
+                
+                x1, y1, x2, y2 = bbox
+                try:
+                    res_frame = cv2.resize(res_frame.astype(np.uint8), (x2-x1, y2-y1))
+                except:
+                    idx += 1
+                    continue
+                
+                combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
+                
+                # Записываем кадр в mmap
+                try:
+                    mmap_writer.write_frame(idx, combine_frame)
+                    if idx % 30 == 0:
+                        print(f"[Daemon] Записан кадр {idx}/{video_len} в mmap", flush=True)
+                except Exception as e:
+                    print(f"[Daemon] Ошибка при записи кадра {idx} в mmap: {e}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+                
+                idx += 1
+            
+            # Финальный статус
+            if idx == video_len:
+                mmap_writer.set_completed()
+                print(f"[Daemon] Сохранено {idx} кадров в mmap для {task_id}", flush=True)
+            else:
+                mmap_writer.set_stopped(idx)
+                print(f"[Daemon] Обработка остановлена: {idx}/{video_len} кадров", flush=True)
+                
+        except Exception as e:
+            print(f"[Daemon] КРИТИЧЕСКАЯ ОШИБКА при обработке кадров: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            if mmap_writer:
+                mmap_writer.set_error(str(e))
+        finally:
+            if mmap_writer:
+                mmap_writer.close()
+    
+    def _process_frames_pipeline_webrtc(self, res_frame_queue, video_len, coord_list_cycle, 
+                                         frame_list_cycle, mask_list_cycle, mask_coords_list_cycle,
+                                         coord_placeholder, frame_callback, video_track=None):
+        """
+        Обрабатывает кадры из очереди и отправляет их по одному для WebRTC.
+        Вызывается в отдельном потоке для пайплайнинга.
+        
+        Args:
+            frame_callback: Функция callback(frame_array, frame_index) для отправки каждого кадра
+            video_track: Ссылка на VideoStreamGenerator для проверки состояния потока
+        """
+        idx = 0
+        empty_count = 0
+        max_empty_retries = 10
+        
+        while idx < video_len:
+            # Проверяем, не остановлен ли поток
+            if video_track and not video_track.running:
+                print(f"[Daemon] Поток остановлен, прерываем обработку кадров на индексе {idx}")
+                break
+            try:
+                res_frame = res_frame_queue.get(block=True, timeout=1)
+                empty_count = 0
+            except queue.Empty:
+                empty_count += 1
+                if empty_count >= max_empty_retries:
+                    break
+                continue
+            
+            bbox = coord_list_cycle[idx % (len(coord_list_cycle))]
+            if bbox == coord_placeholder:
+                idx += 1
+                continue
+            
+            ori_frame = frame_list_cycle[idx % (len(frame_list_cycle))].copy()
+            mask = mask_list_cycle[idx % (len(mask_list_cycle))]
+            mask_crop_box = mask_coords_list_cycle[idx % (len(mask_coords_list_cycle))]
+            
+            x1, y1, x2, y2 = bbox
+            try:
+                res_frame = cv2.resize(res_frame.astype(np.uint8), (x2-x1, y2-y1))
             except:
                 idx += 1
                 continue
             
             combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
-            cv2.imwrite(f"{result_img_save_path}/{str(idx).zfill(8)}.png", combine_frame)
+            
+            # Проверяем состояние потока перед отправкой кадра
+            if video_track and not video_track.running:
+                print(f"[Daemon] Поток остановлен, прерываем обработку кадров на индексе {idx}")
+                break
+            
+            # Отправляем кадр через callback
+            try:
+                frame_callback(combine_frame, idx)
+            except Exception as e:
+                print(f"[Daemon] Ошибка при отправке кадра {idx}: {e}")
+            
             idx += 1
     
-    def process_request(self, config_path):
-        """Обрабатывает запрос на инференс"""
+    def _process_frames_pipeline_stream(self, res_frame_queue, video_len, coord_list_cycle, 
+                                        frame_list_cycle, mask_list_cycle, mask_coords_list_cycle,
+                                        coord_placeholder, segment_callback, segment_duration_seconds=2.0, fps=25):
+        """
+        Обрабатывает кадры из очереди и создает видео сегменты для стриминга.
+        Вызывается в отдельном потоке для пайплайнинга.
+        
+        Args:
+            segment_callback: Функция callback(segment_data, segment_index, start_frame, end_frame) 
+                             для отправки готовых сегментов
+            segment_duration_seconds: Длительность одного сегмента в секундах
+            fps: FPS видео
+        """
+        idx = 0
+        empty_count = 0
+        max_empty_retries = 10
+        frames_per_segment = int(segment_duration_seconds * fps)
+        current_segment_frames = []
+        current_segment_index = 0
+        segment_start_frame = 0
+        
+        while idx < video_len:
+            try:
+                res_frame = res_frame_queue.get(block=True, timeout=1)
+                empty_count = 0
+            except queue.Empty:
+                empty_count += 1
+                if empty_count >= max_empty_retries:
+                    break
+                continue
+            
+            bbox = coord_list_cycle[idx % (len(coord_list_cycle))]
+            if bbox == coord_placeholder:
+                idx += 1
+                continue
+            
+            ori_frame = frame_list_cycle[idx % (len(frame_list_cycle))].copy()
+            mask = mask_list_cycle[idx % (len(mask_list_cycle))]
+            mask_crop_box = mask_coords_list_cycle[idx % (len(mask_coords_list_cycle))]
+            
+            x1, y1, x2, y2 = bbox
+            try:
+                res_frame = cv2.resize(res_frame.astype(np.uint8), (x2-x1, y2-y1))
+            except:
+                idx += 1
+                continue
+            
+            combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
+            current_segment_frames.append(combine_frame)
+            
+            # Если накопили достаточно кадров для сегмента, создаем сегмент
+            if len(current_segment_frames) >= frames_per_segment:
+                segment_end_frame = idx
+                try:
+                    segment_callback(current_segment_frames, current_segment_index, 
+                                   segment_start_frame, segment_end_frame)
+                except Exception as e:
+                    print(f"[Daemon] Ошибка при отправке сегмента {current_segment_index}: {e}")
+                
+                current_segment_frames = []
+                current_segment_index += 1
+                segment_start_frame = idx + 1
+            
+            idx += 1
+        
+        # Отправляем оставшиеся кадры как последний сегмент
+        if len(current_segment_frames) > 0:
+            try:
+                segment_callback(current_segment_frames, current_segment_index, 
+                               segment_start_frame, idx - 1)
+            except Exception as e:
+                print(f"[Daemon] Ошибка при отправке последнего сегмента: {e}")
+    
+    def process_request(self, config_path, restart_count=0, max_restarts=1):
+        """
+        Обрабатывает запрос на инференс
+        
+        Args:
+            config_path: Путь к конфигу запроса
+            restart_count: Количество уже выполненных перезапусков (для защиты от бесконечного цикла)
+            max_restarts: Максимальное количество перезапусков при ошибке памяти
+        """
         with self.lock:
             try:
                 request_start = time.perf_counter()
                 print(f"[Daemon] Начало обработки: {config_path}")
                 
+                # Проверяем, что файл существует и не пустой
+                if not os.path.exists(config_path):
+                    print(f"[Daemon] ОШИБКА: Конфиг не существует: {config_path}")
+                    return
+                
+                file_size = os.path.getsize(config_path)
+                if file_size == 0:
+                    print(f"[Daemon] ОШИБКА: Конфиг пустой: {config_path}")
+                    return
+                
+                print(f"[Daemon] Размер конфига: {file_size} байт")
+                
                 # Загрузка конфига
                 config_start = time.perf_counter()
-                inference_config = OmegaConf.load(config_path)
-                config_time = time.perf_counter() - config_start
-                print(f"[Daemon] Загрузка конфига: {format_time(config_time)}")
+                try:
+                    inference_config = OmegaConf.load(config_path)
+                    config_time = time.perf_counter() - config_start
+                    print(f"[Daemon] Загрузка конфига: {format_time(config_time)}")
+                    print(f"[Daemon] Ключи в конфиге: {list(inference_config.keys())}")
+                except Exception as e:
+                    print(f"[Daemon] ОШИБКА при загрузке конфига: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return
                 
                 # Параметры из конфига или по умолчанию
                 audio_padding_length_left = inference_config.get("audio_padding_length_left", 2)
@@ -376,19 +713,60 @@ class ModelDaemonService:
                 # Определение result_dir
                 result_dir = inference_config.get("result_dir", self.result_dir)
                 
+                # Проверка режима WebRTC
+                webrtc_mode = inference_config.get("webrtc_mode", False)
+                
+                if webrtc_mode:
+                    print(f"[Daemon] Обнаружен WebRTC режим: webrtc_mode={webrtc_mode} (mmap)", flush=True)
+                
                 # Обработка каждой задачи
                 for task_id in inference_config:
                     if task_id in ["audio_padding_length_left", "audio_padding_length_right", 
                                   "batch_size", "fps", "extra_margin", "parsing_mode",
-                                  "use_saved_coord", "saved_coord", "result_dir"]:
+                                  "use_saved_coord", "saved_coord", "result_dir",
+                                  "webrtc_mode"]:
                         continue
                     
                     try:
                         task_start = time.perf_counter()
-                        print(f"[Daemon] Обработка задачи: {task_id}")
+                        print(f"[Daemon] Обработка задачи: {task_id}", flush=True)
                         
                         # Получение конфигурации задачи
                         video_path = inference_config[task_id]["video_path"]
+                        
+                        # Если это WebRTC режим, обрабатываем специальным образом
+                        if webrtc_mode:
+                            print(f"[Daemon] WebRTC режим для задачи {task_id}: video_path={video_path} (mmap)", flush=True)
+                            
+                            # Поддержка обоих форматов
+                            if "audio_path" in inference_config[task_id]:
+                                audio_path = inference_config[task_id]["audio_path"]
+                            else:
+                                raise ValueError(f"Не найден audio_path в конфиге для {task_id} (WebRTC режим)")
+                            
+                            # Вызываем process_request_webrtc_file (mmap режим)
+                            try:
+                                self.process_request_webrtc_file(
+                                    task_id=task_id,
+                                    video_path=video_path,
+                                    audio_path=audio_path,
+                                    frames_dir=None,  # Не используется в mmap режиме
+                                    version=self.version_arg,
+                                    audio_padding_length_left=audio_padding_length_left,
+                                    audio_padding_length_right=audio_padding_length_right,
+                                    batch_size=batch_size,
+                                    fps=fps,
+                                    extra_margin=extra_margin,
+                                    parsing_mode=parsing_mode,
+                                    stop_flag=None  # Можно добавить поддержку stop_flag через конфиг
+                                )
+                                print(f"[Daemon] WebRTC обработка задачи {task_id} завершена успешно", flush=True)
+                            except Exception as e:
+                                print(f"[Daemon] ОШИБКА при обработке WebRTC задачи {task_id}: {e}", flush=True)
+                                import traceback
+                                traceback.print_exc()
+                                raise  # Пробрасываем ошибку дальше
+                            continue  # Пропускаем обычную обработку
                         
                         # Определение пути к подготовленному аватару
                         if self.version_arg == "v15":
@@ -418,11 +796,17 @@ class ModelDaemonService:
                         # Обработка каждого аудио файла
                         input_basename = os.path.basename(video_path).split('.')[0]
                         
-                        # Определяем FPS из video_path (если это видео) для использования в аудио обработке
-                        if get_file_type(video_path) == "video":
-                            video_fps = get_video_fps(video_path)
-                        else:
+                        # Определяем FPS для генерации видео
+                        # Используем переданный параметр fps (если указан), иначе берем из видео файла
+                        if fps and fps > 0:
                             video_fps = fps
+                            print(f"[Daemon] Используется переданный FPS для генерации: {video_fps}")
+                        elif get_file_type(video_path) == "video":
+                            video_fps = get_video_fps(video_path)
+                            print(f"[Daemon] Используется FPS из видео файла: {video_fps}")
+                        else:
+                            video_fps = 25  # Значение по умолчанию
+                            print(f"[Daemon] Используется FPS по умолчанию: {video_fps}")
                         
                         # Загрузка материалов аватара (с кешированием в памяти)
                         avatar_materials = self._load_avatar_materials(task_id, avatar_base_path)
@@ -503,18 +887,40 @@ class ModelDaemonService:
                             total = int(np.ceil(float(video_num) / batch_size))
                             frames_generated = 0
                             
-                            for i, (whisper_batch, latent_batch) in enumerate(tqdm(gen, total=total)):
-                                audio_feature_batch = self.pe(whisper_batch.to(self.device))
-                                latent_batch = latent_batch.to(device=self.device, dtype=self.unet.model.dtype)
-                                
-                                pred_latents = self.unet.model(latent_batch, self.timesteps, encoder_hidden_states=audio_feature_batch).sample
-                                pred_latents = pred_latents.to(device=self.device, dtype=self.vae.vae.dtype)
-                                recon = self.vae.decode_latents(pred_latents)
-                                
-                                # Отправляем кадры в очередь для параллельной обработки
-                                for res_frame in recon:
-                                    res_frame_queue.put(res_frame)
-                                    frames_generated += 1
+                            try:
+                                for i, (whisper_batch, latent_batch) in enumerate(tqdm(gen, total=total)):
+                                    audio_feature_batch = self.pe(whisper_batch.to(self.device))
+                                    latent_batch = latent_batch.to(device=self.device, dtype=self.unet.model.dtype)
+                                    
+                                    pred_latents = self.unet.model(latent_batch, self.timesteps, encoder_hidden_states=audio_feature_batch).sample
+                                    pred_latents = pred_latents.to(device=self.device, dtype=self.vae.vae.dtype)
+                                    recon = self.vae.decode_latents(pred_latents)
+                                    
+                                    # Отправляем кадры в очередь для параллельной обработки
+                                    for res_frame in recon:
+                                        res_frame_queue.put(res_frame)
+                                        frames_generated += 1
+                            except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                                error_msg = str(e)
+                                # Проверяем, является ли это ошибкой переполнения памяти CUDA
+                                if "CUDA out of memory" in error_msg or "out of memory" in error_msg.lower():
+                                    print(f"[Daemon] Ошибка переполнения памяти CUDA при инференсе: {e}")
+                                    # Проверяем, не превышен ли лимит перезапусков
+                                    if restart_count >= max_restarts:
+                                        print(f"[Daemon] Достигнут максимальный лимит перезапусков ({max_restarts}). Прекращаем попытки.")
+                                        raise
+                                    # Проверяем, что конфиг еще существует
+                                    if not os.path.exists(config_path):
+                                        print(f"[Daemon] Конфиг {config_path} больше не существует. Невозможно перезапустить.")
+                                        raise
+                                    # Очищаем память и перезагружаем модели
+                                    self._clear_memory_and_reload_models()
+                                    # Перезапускаем обработку запроса
+                                    print(f"[Daemon] Перезапуск обработки запроса после очистки памяти (попытка {restart_count + 1}/{max_restarts})...")
+                                    return self.process_request(config_path, restart_count=restart_count + 1, max_restarts=max_restarts)
+                                else:
+                                    # Другие RuntimeError - пробрасываем дальше
+                                    raise
                             
                             inference_time = time.perf_counter() - inference_start
                             print(f"[Daemon] Инференс завершен: {format_time(inference_time)} (сгенерировано кадров: {frames_generated})")
@@ -626,6 +1032,29 @@ class ModelDaemonService:
                         task_time = time.perf_counter() - task_start
                         print(f"[Daemon] Задача {task_id} завершена успешно! Общее время задачи: {format_time(task_time)}", flush=True)
                         
+                    except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                        error_msg = str(e)
+                        # Проверяем, является ли это ошибкой переполнения памяти CUDA
+                        if "CUDA out of memory" in error_msg or "out of memory" in error_msg.lower():
+                            print(f"[Daemon] Ошибка переполнения памяти CUDA при обработке задачи {task_id}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            # Проверяем, не превышен ли лимит перезапусков
+                            if restart_count >= max_restarts:
+                                print(f"[Daemon] Достигнут максимальный лимит перезапусков ({max_restarts}). Прекращаем попытки.")
+                                raise
+                            # Проверяем, что конфиг еще существует
+                            if not os.path.exists(config_path):
+                                print(f"[Daemon] Конфиг {config_path} больше не существует. Невозможно перезапустить.")
+                                raise
+                            # Очищаем память и перезагружаем модели
+                            self._clear_memory_and_reload_models()
+                            # Перезапускаем обработку запроса
+                            print(f"[Daemon] Перезапуск обработки запроса после очистки памяти (попытка {restart_count + 1}/{max_restarts})...")
+                            return self.process_request(config_path, restart_count=restart_count + 1, max_restarts=max_restarts)
+                        else:
+                            # Другие RuntimeError - пробрасываем дальше
+                            raise
                     except Exception as e:
                         print(f"[Daemon] Ошибка при обработке задачи {task_id}: {e}")
                         import traceback
@@ -633,42 +1062,846 @@ class ModelDaemonService:
                 
                 # Перемещаем обработанный конфиг
                 move_start = time.perf_counter()
-                processed_dir = os.path.join(self.request_dir, "processed")
-                os.makedirs(processed_dir, exist_ok=True)
-                processed_path = os.path.join(processed_dir, os.path.basename(config_path))
-                if os.path.exists(config_path):
-                    shutil.move(config_path, processed_path)
-                    print(f"[Daemon] Конфиг перемещен в: {processed_path}")
-                # Удаляем из обработанных
-                if config_path in self.processed_files:
-                    self.processed_files.remove(config_path)
+                print(f"[Daemon] Начало перемещения конфига {config_path}...", flush=True)
+                self._move_config_to_processed(config_path)
                 move_time = time.perf_counter() - move_start
                 
                 request_time = time.perf_counter() - request_start
                 print(f"[Daemon] Перемещение конфига: {format_time(move_time)}", flush=True)
                 print(f"[Daemon] Обработка запроса завершена. Общее время: {format_time(request_time)}", flush=True)
                 
+            except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                error_msg = str(e)
+                # Проверяем, является ли это ошибкой переполнения памяти CUDA
+                if "CUDA out of memory" in error_msg or "out of memory" in error_msg.lower():
+                    print(f"[Daemon] Ошибка переполнения памяти CUDA при обработке запроса: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Проверяем, не превышен ли лимит перезапусков
+                    if restart_count >= max_restarts:
+                        print(f"[Daemon] Достигнут максимальный лимит перезапусков ({max_restarts}). Прекращаем попытки.")
+                        raise
+                    # Проверяем, что конфиг еще существует
+                    if not os.path.exists(config_path):
+                        print(f"[Daemon] Конфиг {config_path} больше не существует. Невозможно перезапустить.")
+                        raise
+                    # Очищаем память и перезагружаем модели
+                    self._clear_memory_and_reload_models()
+                    # Перезапускаем обработку запроса
+                    print(f"[Daemon] Перезапуск обработки запроса после очистки памяти (попытка {restart_count + 1}/{max_restarts})...")
+                    return self.process_request(config_path, restart_count=restart_count + 1, max_restarts=max_restarts)
+                else:
+                    # Другие RuntimeError - пробрасываем дальше
+                    raise
             except Exception as e:
                 print(f"[Daemon] Ошибка при обработке запроса: {e}")
                 import traceback
                 traceback.print_exc()
+    
+    def process_request_stream(self, task_id, video_path, audio_path, 
+                              segment_callback, version="v15",
+                              audio_padding_length_left=2, audio_padding_length_right=2,
+                              batch_size=8, fps=25, extra_margin=10, parsing_mode="jaw",
+                              segment_duration_seconds=2.0):
+        """
+        Обрабатывает запрос на стриминг инференса.
+        
+        Args:
+            task_id: ID задачи (для загрузки материалов аватара)
+            video_path: Путь к видео файлу аватара
+            audio_path: Путь к аудио файлу
+            segment_callback: Функция callback(segment_data_base64, segment_index, start_time, end_time)
+                            для отправки готовых сегментов. segment_data_base64 - base64 строка видео сегмента
+            version: Версия модели ("v15" или "v1")
+            segment_duration_seconds: Длительность одного сегмента в секундах
+            Остальные параметры: как в process_request
+        
+        Returns:
+            None (работает асинхронно через callback)
+        """
+        with self.lock:
+            try:
+                request_start = time.perf_counter()
+                print(f"[Daemon] Начало стриминга для задачи: {task_id}")
+                
+                # Определение пути к подготовленному аватару
+                if self.version_arg == "v15":
+                    avatar_base_path = f"./results/{self.version_arg}/avatars/{task_id}"
+                else:  # v1
+                    avatar_base_path = f"./results/avatars/{task_id}"
+                
+                # Загрузка материалов аватара
+                avatar_materials = self._load_avatar_materials(task_id, avatar_base_path)
+                coord_list_cycle = avatar_materials['coord_list_cycle']
+                frame_list_cycle = avatar_materials['frame_list_cycle']
+                input_latent_list_cycle = avatar_materials['input_latent_list_cycle']
+                mask_list_cycle = avatar_materials['mask_list_cycle']
+                mask_coords_list_cycle = avatar_materials['mask_coords_list_cycle']
+                
+                # Определяем FPS для генерации видео
+                # Используем переданный параметр fps (если указан), иначе берем из видео файла
+                if fps and fps > 0:
+                    video_fps = fps
+                    print(f"[Daemon] Используется переданный FPS для генерации: {video_fps}")
+                elif get_file_type(video_path) == "video":
+                    video_fps = get_video_fps(video_path)
+                    print(f"[Daemon] Используется FPS из видео файла: {video_fps}")
+                else:
+                    video_fps = 25  # Значение по умолчанию
+                    print(f"[Daemon] Используется FPS по умолчанию: {video_fps}")
+                
+                # Извлечение аудио фич
+                print(f"[Daemon] Извлечение аудио фич для {audio_path}...")
+                whisper_input_features, librosa_length = self.audio_processor.get_audio_feature(
+                    audio_path, weight_dtype=self.weight_dtype)
+                whisper_chunks = self.audio_processor.get_whisper_chunk(
+                    whisper_input_features,
+                    self.device,
+                    self.weight_dtype,
+                    self.whisper,
+                    librosa_length,
+                    fps=video_fps,
+                    audio_padding_length_left=audio_padding_length_left,
+                    audio_padding_length_right=audio_padding_length_right,
+                )
+                
+                video_num = len(whisper_chunks)
+                print(f"[Daemon] Будет сгенерировано {video_num} кадров")
+                
+                # Создаем очередь для пайплайнинга
+                res_frame_queue = queue.Queue()
+                
+                # Переменная для хранения init segment
+                init_segment_sent = [False]
+                
+                # Функция для создания init segment из первого сегмента
+                def create_init_segment_from_first_segment(first_segment_path, audio_start=0.0, audio_duration=0.1):
+                    """Создает init segment из первого сегмента"""
+                    if init_segment_sent[0]:
+                        return None
+                    
+                    temp_init_dir = os.path.join(self.result_dir, "temp_segments", "init")
+                    os.makedirs(temp_init_dir, exist_ok=True)
+                    
+                    # Создаем init segment - очень короткий фрагмент с полной структурой
+                    temp_init_path = f"{temp_init_dir}/init.mp4"
+                    cmd_init = (
+                        f"ffmpeg -y -v warning -i {audio_path} -i {first_segment_path} "
+                        f"-ss {audio_start:.3f} -t {audio_duration:.3f} "
+                        f"-c:v libx264 -c:a aac -b:v 1M -b:a 128k "
+                        f"-movflags frag_keyframe+empty_moov+default_base_moof "
+                        f"-f mp4 -shortest {temp_init_path}"
+                    )
+                    
+                    try:
+                        result = subprocess.run(
+                            shlex.split(cmd_init),
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                            timeout=30
+                        )
+                        
+                        if os.path.exists(temp_init_path):
+                            with open(temp_init_path, 'rb') as f:
+                                init_data = f.read()
+                            
+                            shutil.rmtree(temp_init_dir, ignore_errors=True)
+                            return init_data
+                    except subprocess.CalledProcessError as e:
+                        print(f"[Daemon] Ошибка при создании init segment: {e}")
+                        if hasattr(e, 'stderr') and e.stderr:
+                            print(f"[Daemon] stderr: {e.stderr[:500]}")
+                    except subprocess.TimeoutExpired as e:
+                        print(f"[Daemon] Таймаут при создании init segment: {e}")
+                    except Exception as e:
+                        print(f"[Daemon] Неожиданная ошибка при создании init segment: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+                    shutil.rmtree(temp_init_dir, ignore_errors=True)
+                    return None
+                
+                # Функция для создания и отправки сегмента
+                def create_and_send_segment(frames_list, segment_index, start_frame, end_frame):
+                    """Создает видео сегмент с аудио и отправляет через callback"""
+                    if len(frames_list) == 0:
+                        return
+                    
+                    # Создаем временную директорию для сегмента
+                    temp_segment_dir = os.path.join(self.result_dir, "temp_segments", f"segment_{segment_index}")
+                    os.makedirs(temp_segment_dir, exist_ok=True)
+                    
+                    # Сохраняем кадры
+                    for i, frame in enumerate(frames_list):
+                        if frame is None:
+                            print(f"[Daemon] Предупреждение: кадр {i} равен None, пропускаем")
+                            continue
+                        if not isinstance(frame, np.ndarray):
+                            print(f"[Daemon] Предупреждение: кадр {i} имеет неправильный тип {type(frame)}, пропускаем")
+                            continue
+                        try:
+                            cv2.imwrite(f"{temp_segment_dir}/{str(i).zfill(8)}.png", frame)
+                        except Exception as e:
+                            print(f"[Daemon] Ошибка при сохранении кадра {i}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            continue
+                    
+                    # Создаем видео без аудио
+                    temp_video_path = f"{temp_segment_dir}/video.mp4"
+                    cmd_img2video = (
+                        f"ffmpeg -y -v warning -r {video_fps} -f image2 "
+                        f"-i {temp_segment_dir}/%08d.png -vcodec libx264 "
+                        f"-vf format=yuv420p -crf 18 -pix_fmt yuv420p {temp_video_path}"
+                    )
+                    
+                    try:
+                        result = subprocess.run(
+                            shlex.split(cmd_img2video),
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                            timeout=60
+                        )
+                    except subprocess.CalledProcessError as e:
+                        print(f"[Daemon] Ошибка при создании видео сегмента: {e}")
+                        if hasattr(e, 'stderr') and e.stderr:
+                            print(f"[Daemon] stderr: {e.stderr[:500]}")
+                        shutil.rmtree(temp_segment_dir, ignore_errors=True)
+                        return
+                    except subprocess.TimeoutExpired as e:
+                        print(f"[Daemon] Таймаут при создании видео сегмента: {e}")
+                        shutil.rmtree(temp_segment_dir, ignore_errors=True)
+                        return
+                    except Exception as e:
+                        print(f"[Daemon] Неожиданная ошибка при создании видео сегмента: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        shutil.rmtree(temp_segment_dir, ignore_errors=True)
+                        return
+                    
+                    # Вычисляем временные метки для аудио
+                    start_time = start_frame / video_fps
+                    end_time = (end_frame + 1) / video_fps
+                    duration = end_time - start_time
+                    
+                    # Для первого сегмента создаем init segment
+                    if segment_index == 0 and not init_segment_sent[0]:
+                        init_data = create_init_segment_from_first_segment(temp_video_path, start_time, min(0.1, duration))
+                        if init_data:
+                            import base64
+                            init_base64 = base64.b64encode(init_data).decode('utf-8')
+                            segment_callback(init_base64, -1, 0, 0, is_init=True)
+                            init_segment_sent[0] = True
+                            print(f"[Daemon] Init segment отправлен")
+                    
+                    # Создаем медиа сегмент (только moof+mdat, без moov)
+                    temp_segment_path = f"{temp_segment_dir}/segment.mp4"
+                    cmd_combine_audio = (
+                        f"ffmpeg -y -v warning -i {audio_path} -i {temp_video_path} "
+                        f"-ss {start_time:.3f} -t {duration:.3f} "
+                        f"-c:v libx264 -c:a aac -b:v 1M -b:a 128k "
+                        f"-movflags frag_keyframe+empty_moov+default_base_moof "
+                        f"-f mp4 -shortest {temp_segment_path}"
+                    )
+                    
+                    try:
+                        result = subprocess.run(
+                            shlex.split(cmd_combine_audio),
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                            timeout=60
+                        )
+                        
+                        # Читаем сегмент и отправляем через callback
+                        if os.path.exists(temp_segment_path):
+                            with open(temp_segment_path, 'rb') as f:
+                                segment_data = f.read()
+                            
+                            import base64
+                            segment_base64 = base64.b64encode(segment_data).decode('utf-8')
+                            
+                            # Отправляем медиа сегмент (не init)
+                            segment_callback(segment_base64, segment_index, start_time, end_time, is_init=False)
+                            
+                            print(f"[Daemon] Сегмент {segment_index} отправлен ({start_time:.2f}s - {end_time:.2f}s)")
+                        else:
+                            print(f"[Daemon] Предупреждение: файл сегмента не найден: {temp_segment_path}")
+                        
+                    except subprocess.CalledProcessError as e:
+                        print(f"[Daemon] Ошибка при создании сегмента {segment_index}: {e}")
+                        if hasattr(e, 'stderr') and e.stderr:
+                            print(f"[Daemon] stderr: {e.stderr[:500]}")
+                    except subprocess.TimeoutExpired as e:
+                        print(f"[Daemon] Таймаут при создании сегмента {segment_index}: {e}")
+                    except Exception as e:
+                        print(f"[Daemon] Неожиданная ошибка при создании сегмента {segment_index}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+                    # Очистка временных файлов
+                    shutil.rmtree(temp_segment_dir, ignore_errors=True)
+                
+                # Запускаем поток обработки кадров для стриминга
+                process_thread = threading.Thread(
+                    target=self._process_frames_pipeline_stream,
+                    args=(
+                        res_frame_queue, video_num, coord_list_cycle,
+                        frame_list_cycle, mask_list_cycle, mask_coords_list_cycle,
+                        coord_placeholder, create_and_send_segment, 
+                        segment_duration_seconds, video_fps
+                    )
+                )
+                process_thread.start()
+                
+                # Генерация кадров и отправка в очередь
+                gen = datagen(
+                    whisper_chunks=whisper_chunks,
+                    vae_encode_latents=input_latent_list_cycle,
+                    batch_size=batch_size,
+                    delay_frame=0,
+                    device=self.device,
+                )
+                
+                total = int(np.ceil(float(video_num) / batch_size))
+                frames_generated = 0
+                
+                for i, (whisper_batch, latent_batch) in enumerate(tqdm(gen, total=total)):
+                    audio_feature_batch = self.pe(whisper_batch.to(self.device))
+                    latent_batch = latent_batch.to(device=self.device, dtype=self.unet.model.dtype)
+                    
+                    pred_latents = self.unet.model(latent_batch, self.timesteps, encoder_hidden_states=audio_feature_batch).sample
+                    pred_latents = pred_latents.to(device=self.device, dtype=self.vae.vae.dtype)
+                    recon = self.vae.decode_latents(pred_latents)
+                    
+                    for res_frame in recon:
+                        res_frame_queue.put(res_frame)
+                        frames_generated += 1
+                
+                print(f"[Daemon] Инференс завершен: сгенерировано {frames_generated} кадров")
+                
+                # Ждем завершения обработки всех кадров
+                process_thread.join(timeout=600)
+                if process_thread.is_alive():
+                    print("[Daemon] Предупреждение: поток обработки кадров не завершился в течение таймаута")
+                
+                request_time = time.perf_counter() - request_start
+                print(f"[Daemon] Стриминг завершен. Общее время: {format_time(request_time)}")
+                
+            except Exception as e:
+                print(f"[Daemon] Ошибка при обработке стриминга: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+    
+    def process_request_webrtc(self, task_id, video_path, audio_path, 
+                               frame_callback, version="v15",
+                               audio_padding_length_left=2, audio_padding_length_right=2,
+                               batch_size=8, fps=25, extra_margin=10, parsing_mode="jaw",
+                               video_track=None, stop_flag=None):
+        """
+        Обрабатывает запрос на WebRTC стриминг инференса.
+        Отправляет кадры по одному через callback.
+        
+        Args:
+            task_id: ID задачи
+            video_path: Путь к видео файлу аватара
+            audio_path: Путь к аудио файлу
+            frame_callback: Функция callback(frame_array, frame_index) для отправки каждого кадра
+            Остальные параметры: как в process_request_stream
+        """
+        # Проверяем, что модели загружены
+        if self.skip_model_loading or self.whisper is None or self.unet is None or self.vae is None:
+            raise RuntimeError(
+                "Модели не загружены. process_request_webrtc требует прямого доступа к моделям. "
+                "Если демон уже запущен отдельно, не используйте skip_model_loading=True для WebRTC API, "
+                "или запустите API без отдельного демона."
+            )
+        
+        with self.lock:
+            try:
+                request_start = time.perf_counter()
+                print(f"[Daemon] Начало WebRTC стриминга для задачи: {task_id}")
+                
+                # Определение пути к подготовленному аватару
+                if self.version_arg == "v15":
+                    avatar_base_path = f"./results/{self.version_arg}/avatars/{task_id}"
+                else:  # v1
+                    avatar_base_path = f"./results/avatars/{task_id}"
+                
+                # Загрузка материалов аватара
+                avatar_materials = self._load_avatar_materials(task_id, avatar_base_path)
+                coord_list_cycle = avatar_materials['coord_list_cycle']
+                frame_list_cycle = avatar_materials['frame_list_cycle']
+                input_latent_list_cycle = avatar_materials['input_latent_list_cycle']
+                mask_list_cycle = avatar_materials['mask_list_cycle']
+                mask_coords_list_cycle = avatar_materials['mask_coords_list_cycle']
+                
+                # Определяем FPS для генерации видео
+                # Используем переданный параметр fps (если указан), иначе берем из видео файла
+                if fps and fps > 0:
+                    video_fps = fps
+                    print(f"[Daemon] Используется переданный FPS для генерации: {video_fps}")
+                elif get_file_type(video_path) == "video":
+                    video_fps = get_video_fps(video_path)
+                    print(f"[Daemon] Используется FPS из видео файла: {video_fps}")
+                else:
+                    video_fps = 25  # Значение по умолчанию
+                    print(f"[Daemon] Используется FPS по умолчанию: {video_fps}")
+                
+                # Извлечение аудио фич
+                print(f"[Daemon] Извлечение аудио фич для {audio_path}...")
+                whisper_input_features, librosa_length = self.audio_processor.get_audio_feature(
+                    audio_path, weight_dtype=self.weight_dtype)
+                whisper_chunks = self.audio_processor.get_whisper_chunk(
+                    whisper_input_features,
+                    self.device,
+                    self.weight_dtype,
+                    self.whisper,
+                    librosa_length,
+                    fps=video_fps,
+                    audio_padding_length_left=audio_padding_length_left,
+                    audio_padding_length_right=audio_padding_length_right,
+                )
+                
+                video_num = len(whisper_chunks)
+                print(f"[Daemon] Будет сгенерировано {video_num} кадров для WebRTC")
+                
+                # Создаем очередь для пайплайнинга
+                res_frame_queue = queue.Queue()
+                
+                # Запускаем поток обработки кадров для WebRTC
+                process_thread = threading.Thread(
+                    target=self._process_frames_pipeline_webrtc,
+                    args=(
+                        res_frame_queue, video_num, coord_list_cycle,
+                        frame_list_cycle, mask_list_cycle, mask_coords_list_cycle,
+                        coord_placeholder, frame_callback, video_track
+                    )
+                )
+                process_thread.start()
+                
+                # Генерация кадров и отправка в очередь
+                gen = datagen(
+                    whisper_chunks=whisper_chunks,
+                    vae_encode_latents=input_latent_list_cycle,
+                    batch_size=batch_size,
+                    delay_frame=0,
+                    device=self.device,
+                )
+                
+                total = int(np.ceil(float(video_num) / batch_size))
+                frames_generated = 0
+                
+                # Проверяем состояние перед началом генерации
+                if video_track:
+                    print(f"[Daemon] Состояние video_track перед генерацией: running={video_track.running}, queue_size={video_track.frame_queue.qsize()}")
+                    if not video_track.running:
+                        print(f"[Daemon] ВНИМАНИЕ: video_track.running = False перед началом генерации! Устанавливаем в True")
+                        video_track.running = True
+                
+                for i, (whisper_batch, latent_batch) in enumerate(tqdm(gen, total=total)):
+                    # Проверяем, не остановлен ли поток или не установлен ли флаг остановки
+                    if stop_flag and stop_flag.is_set():
+                        print(f"[Daemon] Получен сигнал остановки генерации на батче {i}/{total}")
+                        break
+                    if video_track and not video_track.running:
+                        print(f"[Daemon] Поток остановлен, прерываем генерацию на батче {i}/{total}")
+                        print(f"[Daemon] Состояние video_track: running={video_track.running}, queue_size={video_track.frame_queue.qsize()}")
+                        break
+                    try:
+                        # Проверяем валидность входных данных
+                        if whisper_batch is None or latent_batch is None:
+                            print(f"[Daemon] Предупреждение: пропускаем батч {i} из-за None значений")
+                            continue
+                        
+                        audio_feature_batch = self.pe(whisper_batch.to(self.device))
+                        latent_batch = latent_batch.to(device=self.device, dtype=self.unet.model.dtype)
+                        
+                        pred_latents = self.unet.model(latent_batch, self.timesteps, encoder_hidden_states=audio_feature_batch).sample
+                        pred_latents = pred_latents.to(device=self.device, dtype=self.vae.vae.dtype)
+                        
+                        # Освобождаем промежуточные тензоры
+                        del audio_feature_batch, latent_batch
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                        
+                        # Декодируем латенты через VAE (используем меньший размер батча для декодирования, если батч большой)
+                        vae_decode_batch_size = min(4, batch_size) if batch_size > 4 else None
+                        recon = self.vae.decode_latents(pred_latents, max_batch_size=vae_decode_batch_size)
+                        
+                        # Освобождаем pred_latents после декодирования
+                        del pred_latents
+                        
+                        # Проверяем результат декодирования
+                        if recon is None:
+                            print(f"[Daemon] Предупреждение: результат декодирования равен None для батча {i}")
+                            continue
+                        
+                        for res_frame in recon:
+                            # Проверяем флаг остановки и состояние потока перед добавлением кадра
+                            if stop_flag and stop_flag.is_set():
+                                print(f"[Daemon] Получен сигнал остановки генерации")
+                                break
+                            if video_track and not video_track.running:
+                                print(f"[Daemon] Поток остановлен, прерываем генерацию")
+                                break
+                            res_frame_queue.put(res_frame)
+                            frames_generated += 1
+                        
+                        # Проверяем флаг остановки и состояние потока после обработки батча
+                        if stop_flag and stop_flag.is_set():
+                            print(f"[Daemon] Получен сигнал остановки генерации")
+                            break
+                        if video_track and not video_track.running:
+                            print(f"[Daemon] Поток остановлен, прерываем генерацию")
+                            break
+                        
+                        # Освобождаем recon после обработки
+                        del recon
+                        
+                        # Периодическая очистка CUDA кэша (каждый 5-й батч или последний)
+                        if (i + 1) % 5 == 0 or i == total - 1:
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            gc.collect()
+                            
+                    except torch.cuda.OutOfMemoryError as e:
+                        # Очищаем память и пробуем обработать меньшим подбатчем
+                        print(f"[Daemon] CUDA OOM на батче {i}, попытка обработки меньшими подбатчами...")
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        gc.collect()
+                        
+                        # Разбиваем батч на меньшие части
+                        sub_batch_size = max(1, batch_size // 2)
+                        whisper_sub_batches = torch.split(whisper_batch, sub_batch_size, dim=0)
+                        latent_sub_batches = torch.split(latent_batch, sub_batch_size, dim=0)
+                        
+                        for sub_whisper, sub_latent in zip(whisper_sub_batches, latent_sub_batches):
+                            audio_feature_batch = self.pe(sub_whisper.to(self.device))
+                            sub_latent = sub_latent.to(device=self.device, dtype=self.unet.model.dtype)
+                            
+                            pred_latents = self.unet.model(sub_latent, self.timesteps, encoder_hidden_states=audio_feature_batch).sample
+                            pred_latents = pred_latents.to(device=self.device, dtype=self.vae.vae.dtype)
+                            
+                            del audio_feature_batch, sub_latent
+                            if torch.cuda.is_available():
+                                torch.cuda.synchronize()
+                            
+                            # Используем меньший размер батча для декодирования в подбатчах
+                            recon = self.vae.decode_latents(pred_latents, max_batch_size=2)
+                            del pred_latents
+                            
+                            for res_frame in recon:
+                                # Проверяем состояние потока перед добавлением кадра
+                                if video_track and not video_track.running:
+                                    print(f"[Daemon] Поток остановлен, прерываем генерацию в подбатче")
+                                    break
+                                res_frame_queue.put(res_frame)
+                                frames_generated += 1
+                            
+                            # Проверяем состояние потока после обработки подбатча
+                            if video_track and not video_track.running:
+                                print(f"[Daemon] Поток остановлен, прерываем генерацию")
+                                break
+                            
+                            del recon
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            gc.collect()
+                        
+                        # Проверяем состояние потока после обработки всех подбатчей
+                        if video_track and not video_track.running:
+                            print(f"[Daemon] Поток остановлен, прерываем генерацию")
+                            break
+                        
+                        del whisper_batch, latent_batch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except RuntimeError as e:
+                        # Обработка других RuntimeError (может включать CUDA ошибки)
+                        error_msg = str(e)
+                        print(f"[Daemon] RuntimeError на батче {i}: {error_msg}")
+                        if "CUDA" in error_msg or "cuda" in error_msg:
+                            print(f"[Daemon] Очистка CUDA кэша после ошибки...")
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        gc.collect()
+                        # Пропускаем проблемный батч и продолжаем
+                        continue
+                    except Exception as e:
+                        # Обработка всех остальных исключений для предотвращения segfault
+                        print(f"[Daemon] Неожиданная ошибка на батче {i}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # Очищаем память
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        gc.collect()
+                        # Пропускаем проблемный батч и продолжаем
+                        continue
+                
+                # Проверяем, была ли генерация прервана
+                was_interrupted = video_track and not video_track.running
+                if was_interrupted:
+                    print(f"[Daemon] Инференс прерван (поток остановлен): сгенерировано {frames_generated} из {video_num} кадров")
+                else:
+                    print(f"[Daemon] Инференс завершен: сгенерировано {frames_generated} кадров")
+                
+                # Финальная очистка памяти после генерации всех кадров
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+                
+                # Ждем завершения обработки всех кадров
+                process_thread.join(timeout=600)
+                if process_thread.is_alive():
+                    print("[Daemon] Предупреждение: поток обработки кадров не завершился в течение таймаута")
+                
+                request_time = time.perf_counter() - request_start
+                print(f"[Daemon] WebRTC стриминг завершен. Общее время: {format_time(request_time)}")
+                
+            except Exception as e:
+                print(f"[Daemon] Ошибка при обработке WebRTC стриминга: {e}")
+                import traceback
+                traceback.print_exc()
+                # Очищаем память при ошибке
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+                raise
+    
+    def process_request_webrtc_file(self, task_id, video_path, audio_path, 
+                                    frames_dir, version="v15",
+                                    audio_padding_length_left=2, audio_padding_length_right=2,
+                                    batch_size=8, fps=25, extra_margin=10, parsing_mode="jaw",
+                                    stop_flag=None):
+        """
+        Обрабатывает запрос на WebRTC стриминг инференса и сохраняет кадры в директорию.
+        Используется когда API работает без загруженных моделей.
+        
+        Args:
+            task_id: ID задачи
+            video_path: Путь к видео файлу аватара
+            audio_path: Путь к аудио файлу
+            frames_dir: Директория для сохранения кадров
+            Остальные параметры: как в process_request_webrtc
+        """
+        # Проверяем, что модели загружены
+        if self.skip_model_loading or self.whisper is None or self.unet is None or self.vae is None:
+            raise RuntimeError(
+                "Модели не загружены. process_request_webrtc_file требует загруженных моделей в демоне."
+            )
+        
+        # НЕ используем self.lock здесь, так как метод вызывается из process_request, который уже держит lock
+        try:
+            request_start = time.perf_counter()
+            print(f"[Daemon] Начало WebRTC стриминга (файловый режим) для задачи: {task_id}", flush=True)
+            
+            # Определение пути к подготовленному аватару
+            if self.version_arg == "v15":
+                avatar_base_path = f"./results/{self.version_arg}/avatars/{task_id}"
+            else:  # v1
+                avatar_base_path = f"./results/avatars/{task_id}"
+            
+            # Загрузка материалов аватара
+            avatar_materials = self._load_avatar_materials(task_id, avatar_base_path)
+            coord_list_cycle = avatar_materials['coord_list_cycle']
+            frame_list_cycle = avatar_materials['frame_list_cycle']
+            input_latent_list_cycle = avatar_materials['input_latent_list_cycle']
+            mask_list_cycle = avatar_materials['mask_list_cycle']
+            mask_coords_list_cycle = avatar_materials['mask_coords_list_cycle']
+            
+            # Определяем FPS для генерации видео
+            if fps and fps > 0:
+                video_fps = fps
+                print(f"[Daemon] Используется переданный FPS для генерации: {video_fps}", flush=True)
+            elif get_file_type(video_path) == "video":
+                video_fps = get_video_fps(video_path)
+                print(f"[Daemon] Используется FPS из видео файла: {video_fps}", flush=True)
+            else:
+                video_fps = 25
+                print(f"[Daemon] Используется FPS по умолчанию: {video_fps}", flush=True)
+            
+            # Извлечение аудио фич
+            print(f"[Daemon] Извлечение аудио фич для {audio_path}...", flush=True)
+            whisper_input_features, librosa_length = self.audio_processor.get_audio_feature(
+                audio_path, weight_dtype=self.weight_dtype)
+            whisper_chunks = self.audio_processor.get_whisper_chunk(
+                whisper_input_features,
+                self.device,
+                self.weight_dtype,
+                self.whisper,
+                librosa_length,
+                fps=video_fps,
+                audio_padding_length_left=audio_padding_length_left,
+                audio_padding_length_right=audio_padding_length_right,
+            )
+            
+            video_num = len(whisper_chunks)
+            print(f"[Daemon] Будет сгенерировано {video_num} кадров для WebRTC (файловый режим)", flush=True)
+            
+            # Создаем очередь для пайплайнинга
+            res_frame_queue = queue.Queue()
+            
+            # Запускаем поток обработки кадров для WebRTC (mmap режим)
+            from musetalk.utils.preprocessing import coord_placeholder
+            process_thread = threading.Thread(
+                target=self._process_frames_pipeline_webrtc_file,
+                args=(
+                    res_frame_queue, video_num, coord_list_cycle,
+                    frame_list_cycle, mask_list_cycle, mask_coords_list_cycle,
+                    coord_placeholder, task_id, stop_flag
+                )
+            )
+            process_thread.start()
+            
+            # Генерация кадров и отправка в очередь
+            gen = datagen(
+                whisper_chunks=whisper_chunks,
+                vae_encode_latents=input_latent_list_cycle,
+                batch_size=batch_size,
+                delay_frame=0,
+                device=self.device,
+            )
+            
+            total = int(np.ceil(float(video_num) / batch_size))
+            frames_generated = 0
+            
+            for i, (whisper_batch, latent_batch) in enumerate(tqdm(gen, total=total)):
+                # Проверяем флаг остановки
+                if stop_flag and stop_flag.is_set():
+                    print(f"[Daemon] Получен сигнал остановки генерации на батче {i}/{total}", flush=True)
+                    break
+                
+                try:
+                    if whisper_batch is None or latent_batch is None:
+                        print(f"[Daemon] Предупреждение: пропускаем батч {i} из-за None значений", flush=True)
+                        continue
+                    
+                    audio_feature_batch = self.pe(whisper_batch.to(self.device))
+                    latent_batch = latent_batch.to(device=self.device, dtype=self.unet.model.dtype)
+                    
+                    pred_latents = self.unet.model(latent_batch, self.timesteps, encoder_hidden_states=audio_feature_batch).sample
+                    pred_latents = pred_latents.to(device=self.device, dtype=self.vae.vae.dtype)
+                    
+                    del audio_feature_batch, latent_batch
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    
+                    vae_decode_batch_size = min(4, batch_size) if batch_size > 4 else None
+                    recon = self.vae.decode_latents(pred_latents, max_batch_size=vae_decode_batch_size)
+                    
+                    del pred_latents
+                    
+                    if recon is None:
+                        print(f"[Daemon] Предупреждение: результат декодирования равен None для батча {i}", flush=True)
+                        continue
+                    
+                    for res_frame in recon:
+                        if stop_flag and stop_flag.is_set():
+                            break
+                        res_frame_queue.put(res_frame)
+                        frames_generated += 1
+                    
+                    if stop_flag and stop_flag.is_set():
+                        break
+                    
+                    del recon
+                    
+                    if (i + 1) % 5 == 0 or i == total - 1:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        gc.collect()
+                        
+                except Exception as e:
+                    print(f"[Daemon] Ошибка на батче {i}: {e}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
+                    continue
+            
+            print(f"[Daemon] Инференс завершен: сгенерировано {frames_generated} кадров", flush=True)
+            
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            
+            # Ждем завершения обработки всех кадров
+            process_thread.join(timeout=600)
+            if process_thread.is_alive():
+                print("[Daemon] Предупреждение: поток обработки кадров не завершился в течение таймаута", flush=True)
+            
+            request_time = time.perf_counter() - request_start
+            print(f"[Daemon] WebRTC стриминг (файловый режим) завершен. Общее время: {format_time(request_time)}", flush=True)
+            
+        except Exception as e:
+            print(f"[Daemon] Ошибка при обработке WebRTC стриминга (файловый режим): {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            raise
+    
+    def _move_config_to_processed(self, config_path):
+        """Перемещает конфиг в processed директорию"""
+        try:
+            processed_dir = os.path.join(self.request_dir, "processed")
+            os.makedirs(processed_dir, exist_ok=True)
+            processed_path = os.path.join(processed_dir, os.path.basename(config_path))
+            if os.path.exists(config_path):
+                shutil.move(config_path, processed_path)
+                print(f"[Daemon] Конфиг перемещен в processed: {processed_path}", flush=True)
+            # Удаляем из обработанных
+            if config_path in self.processed_files:
+                self.processed_files.remove(config_path)
+        except Exception as e:
+            print(f"[Daemon] ОШИБКА при перемещении конфига в processed: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
     
     def _check_for_new_configs(self):
         """Проверяет наличие новых конфигов в директории запросов"""
         processed_dir = os.path.join(self.request_dir, "processed")
         
         # Проверяем .yaml файлы (только в корне request_dir, не в поддиректориях)
-        for config_file in Path(self.request_dir).glob("*.yaml"):
+        config_files = list(Path(self.request_dir).glob("*.yaml"))
+        if config_files:
+            print(f"[Daemon] Найдено {len(config_files)} .yaml файлов в {self.request_dir}")
+        
+        for config_file in config_files:
+            config_file_str = str(config_file)
             # Пропускаем файлы из processed директории
-            if "processed" in str(config_file):
+            if "processed" in config_file_str:
+                print(f"[Daemon] Пропущен конфиг из processed директории: {config_file_str}")
                 continue
-            if str(config_file) not in self.processed_files:
+            
+            if config_file_str not in self.processed_files:
+                print(f"[Daemon] Проверка нового конфига: {config_file_str} (еще не в processed_files)")
                 # Проверяем, что файл полностью записан (размер не меняется)
                 time.sleep(0.5)
-                if str(config_file) not in self.processed_files and os.path.exists(config_file):
-                    self.processed_files.add(str(config_file))
-                    print(f"[Daemon] Обнаружен новый конфиг: {config_file}")
-                    threading.Thread(target=self.process_request, args=(str(config_file),), daemon=True).start()
+                if config_file_str not in self.processed_files and os.path.exists(config_file):
+                    file_size = os.path.getsize(config_file)
+                    print(f"[Daemon] Размер файла {config_file_str}: {file_size} байт")
+                    if file_size > 0:  # Проверяем, что файл не пустой
+                        self.processed_files.add(config_file_str)
+                        print(f"[Daemon] Обнаружен новый конфиг: {config_file_str} (размер: {file_size} байт)", flush=True)
+                        threading.Thread(target=self.process_request, args=(config_file_str,), daemon=True).start()
+                    else:
+                        print(f"[Daemon] Пропущен пустой конфиг: {config_file_str} (размер: {file_size} байт)", flush=True)
+                else:
+                    if config_file_str in self.processed_files:
+                        print(f"[Daemon] Конфиг уже в processed_files: {config_file_str}")
+                    elif not os.path.exists(config_file):
+                        print(f"[Daemon] Конфиг не существует: {config_file_str}")
+            else:
+                print(f"[Daemon] Конфиг уже обработан: {config_file_str} (в processed_files)")
         
         # Проверяем .yml файлы
         for config_file in Path(self.request_dir).glob("*.yml"):
@@ -687,8 +1920,8 @@ class ModelDaemonService:
         # Обрабатываем существующие файлы
         self._check_for_new_configs()
         
-        print(f"[Daemon] Сервис запущен и следит за директорией: {self.request_dir}")
-        print("[Daemon] Для остановки нажмите Ctrl+C")
+        print(f"[Daemon] Сервис запущен и следит за директорией: {self.request_dir}", flush=True)
+        print("[Daemon] Для остановки нажмите Ctrl+C", flush=True)
         
         try:
             while True:
@@ -715,22 +1948,31 @@ def main():
     
     args = parser.parse_args()
     
-    # Создание сервиса
-    service = ModelDaemonService(
-        version=args.version,
-        gpu_id=args.gpu_id,
-        use_float16=args.use_float16,
-        whisper_dir=args.whisper_dir,
-        vae_type=args.vae_type,
-        ffmpeg_path=args.ffmpeg_path,
-        left_cheek_width=args.left_cheek_width,
-        right_cheek_width=args.right_cheek_width,
-        request_dir=args.request_dir,
-        result_dir=args.result_dir
-    )
-    
-    # Запуск сервиса
-    service.run()
+    try:
+        print(f"[Daemon] Запуск демон-сервиса (версия: {args.version}, GPU: {args.gpu_id})", flush=True)
+        
+        # Создание сервиса
+        service = ModelDaemonService(
+            version=args.version,
+            gpu_id=args.gpu_id,
+            use_float16=args.use_float16,
+            whisper_dir=args.whisper_dir,
+            vae_type=args.vae_type,
+            ffmpeg_path=args.ffmpeg_path,
+            left_cheek_width=args.left_cheek_width,
+            right_cheek_width=args.right_cheek_width,
+            request_dir=args.request_dir,
+            result_dir=args.result_dir
+        )
+        
+        # Запуск сервиса
+        print("[Daemon] Запуск основного цикла сервиса...", flush=True)
+        service.run()
+    except Exception as e:
+        print(f"[Daemon] КРИТИЧЕСКАЯ ОШИБКА при запуске сервиса: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
