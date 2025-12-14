@@ -32,7 +32,7 @@ import pickle
 import numpy as np
 from tqdm import tqdm
 import gc
-from scripts.mmap_frame_buffer import MmapFrameWriter, get_mmap_path
+from scripts.mmap_frame_buffer import MmapFrameWriter, get_mmap_path, create_error_mmap_file
 
 
 def fast_check_ffmpeg():
@@ -430,100 +430,151 @@ class ModelDaemonService:
             task_id: ID задачи для создания mmap файла
             stop_flag: Флаг остановки генерации
         """
-        idx = 0
-        empty_count = 0
-        max_empty_retries = 10
-        
-        # Определяем форму кадра из первого кадра (нужно для инициализации mmap)
-        # Берем форму из первого кадра в frame_list_cycle
-        if len(frame_list_cycle) == 0:
-            print("[Daemon] Ошибка: frame_list_cycle пуст")
-            return
-        
-        sample_frame = frame_list_cycle[0]
-        frame_shape = sample_frame.shape  # (height, width, channels)
-        
-        # Инициализируем mmap writer
         mmap_writer = None
         try:
-            mmap_writer = MmapFrameWriter(
-                task_id=task_id,
-                total_frames=video_len,
-                frame_shape=frame_shape,
-                frame_dtype=np.uint8
-            )
-            print(f"[Daemon] Инициализирован mmap writer для {task_id}: {frame_shape}, {video_len} кадров", flush=True)
-        except Exception as e:
-            print(f"[Daemon] Ошибка при инициализации mmap writer: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            return
-        
-        try:
-            while idx < video_len:
-                # Проверяем флаг остановки
-                if stop_flag and stop_flag.is_set():
-                    print(f"[Daemon] Получен сигнал остановки, прерываем обработку кадров на индексе {idx}", flush=True)
-                    mmap_writer.set_stopped(idx)
-                    break
-                    
-                try:
-                    res_frame = res_frame_queue.get(block=True, timeout=1)
-                    empty_count = 0
-                except queue.Empty:
-                    empty_count += 1
-                    if empty_count >= max_empty_retries:
-                        print(f"[Daemon] Превышено количество пустых попыток, завершаем обработку", flush=True)
-                        break
-                    continue
-                
-                bbox = coord_list_cycle[idx % (len(coord_list_cycle))]
-                if bbox == coord_placeholder:
-                    idx += 1
-                    continue
-                
-                ori_frame = frame_list_cycle[idx % (len(frame_list_cycle))].copy()
-                mask = mask_list_cycle[idx % (len(mask_list_cycle))]
-                mask_crop_box = mask_coords_list_cycle[idx % (len(mask_coords_list_cycle))]
-                
-                x1, y1, x2, y2 = bbox
-                try:
-                    res_frame = cv2.resize(res_frame.astype(np.uint8), (x2-x1, y2-y1))
-                except:
-                    idx += 1
-                    continue
-                
-                combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
-                
-                # Записываем кадр в mmap
-                try:
-                    mmap_writer.write_frame(idx, combine_frame)
-                    if idx % 30 == 0:
-                        print(f"[Daemon] Записан кадр {idx}/{video_len} в mmap", flush=True)
-                except Exception as e:
-                    print(f"[Daemon] Ошибка при записи кадра {idx} в mmap: {e}", flush=True)
-                    import traceback
-                    traceback.print_exc()
-                
-                idx += 1
+            print(f"[Daemon] Поток обработки кадров начал работу для task_id={task_id}", flush=True)
+            print(f"[Daemon] Параметры потока: video_len={video_len}, frame_list_cycle_len={len(frame_list_cycle)}, coord_list_cycle_len={len(coord_list_cycle)}", flush=True)
             
-            # Финальный статус
-            if idx == video_len:
-                mmap_writer.set_completed()
-                print(f"[Daemon] Сохранено {idx} кадров в mmap для {task_id}", flush=True)
-            else:
-                mmap_writer.set_stopped(idx)
-                print(f"[Daemon] Обработка остановлена: {idx}/{video_len} кадров", flush=True)
+            # Проверяем video_len
+            if video_len == 0:
+                error_msg = f"[Daemon] КРИТИЧЕСКАЯ ОШИБКА: video_len равен 0 для task_id={task_id}. Нет кадров для обработки."
+                print(error_msg, flush=True)
+                # Создаем mmap файл с ошибкой, чтобы API мог обнаружить проблему
+                try:
+                    create_error_mmap_file(task_id, error_msg)
+                except Exception as e2:
+                    print(f"[Daemon] Не удалось создать mmap файл для индикации ошибки: {e2}", flush=True)
+                return
+            
+            idx = 0
+            empty_count = 0
+            max_empty_retries = 10
+            
+            # Определяем форму кадра из первого кадра (нужно для инициализации mmap)
+            # Берем форму из первого кадра в frame_list_cycle
+            if len(frame_list_cycle) == 0:
+                error_msg = f"[Daemon] КРИТИЧЕСКАЯ ОШИБКА: frame_list_cycle пуст для task_id={task_id}. Невозможно создать mmap файл."
+                print(error_msg, flush=True)
+                import traceback
+                traceback.print_exc()
+                # Создаем mmap файл с ошибкой, чтобы API мог обнаружить проблему
+                try:
+                    create_error_mmap_file(task_id, error_msg)
+                except Exception as e:
+                    print(f"[Daemon] Не удалось создать mmap файл для индикации ошибки: {e}", flush=True)
+                return
+            
+            sample_frame = frame_list_cycle[0]
+            frame_shape = sample_frame.shape  # (height, width, channels)
+            
+            # Инициализируем mmap writer
+            try:
+                mmap_writer = MmapFrameWriter(
+                    task_id=task_id,
+                    total_frames=video_len,
+                    frame_shape=frame_shape,
+                    frame_dtype=np.uint8
+                )
+                print(f"[Daemon] Инициализирован mmap writer для {task_id}: {frame_shape}, {video_len} кадров", flush=True)
+            except Exception as e:
+                print(f"[Daemon] Ошибка при инициализации mmap writer: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                # Создаем mmap файл с ошибкой, чтобы API мог обнаружить проблему
+                try:
+                    create_error_mmap_file(task_id, f"Ошибка при инициализации mmap writer: {e}")
+                except Exception as e2:
+                    print(f"[Daemon] Не удалось создать mmap файл для индикации ошибки: {e2}", flush=True)
+                return
+            
+            try:
+                while idx < video_len:
+                    # Проверяем флаг остановки
+                    if stop_flag and stop_flag.is_set():
+                        print(f"[Daemon] Получен сигнал остановки, прерываем обработку кадров на индексе {idx}", flush=True)
+                        mmap_writer.set_stopped(idx)
+                        break
+                        
+                    try:
+                        res_frame = res_frame_queue.get(block=True, timeout=1)
+                        empty_count = 0
+                    except queue.Empty:
+                        empty_count += 1
+                        if empty_count >= max_empty_retries:
+                            print(f"[Daemon] Превышено количество пустых попыток, завершаем обработку", flush=True)
+                            break
+                        continue
+                    
+                    bbox = coord_list_cycle[idx % (len(coord_list_cycle))]
+                    if bbox == coord_placeholder:
+                        idx += 1
+                        continue
+                    
+                    ori_frame = frame_list_cycle[idx % (len(frame_list_cycle))].copy()
+                    mask = mask_list_cycle[idx % (len(mask_list_cycle))]
+                    mask_crop_box = mask_coords_list_cycle[idx % (len(mask_coords_list_cycle))]
+                    
+                    x1, y1, x2, y2 = bbox
+                    try:
+                        res_frame = cv2.resize(res_frame.astype(np.uint8), (x2-x1, y2-y1))
+                    except:
+                        idx += 1
+                        continue
+                    
+                    combine_frame = get_image_blending(ori_frame, res_frame, bbox, mask, mask_crop_box)
+                    
+                    # Записываем кадр в mmap
+                    try:
+                        mmap_writer.write_frame(idx, combine_frame)
+                        if idx % 30 == 0:
+                            print(f"[Daemon] Записан кадр {idx}/{video_len} в mmap", flush=True)
+                    except Exception as e:
+                        print(f"[Daemon] Ошибка при записи кадра {idx} в mmap: {e}", flush=True)
+                        import traceback
+                        traceback.print_exc()
+                    
+                    idx += 1
                 
-        except Exception as e:
-            print(f"[Daemon] КРИТИЧЕСКАЯ ОШИБКА при обработке кадров: {e}", flush=True)
+                # Финальный статус
+                if idx == video_len:
+                    mmap_writer.set_completed()
+                    print(f"[Daemon] Сохранено {idx} кадров в mmap для {task_id}", flush=True)
+                else:
+                    mmap_writer.set_stopped(idx)
+                    print(f"[Daemon] Обработка остановлена: {idx}/{video_len} кадров", flush=True)
+                    
+            except Exception as e:
+                print(f"[Daemon] КРИТИЧЕСКАЯ ОШИБКА при обработке кадров: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                if mmap_writer:
+                    try:
+                        mmap_writer.set_error(str(e))
+                    except:
+                        pass
+                else:
+                    # Если mmap_writer еще не создан, пытаемся создать mmap файл для индикации ошибки
+                    try:
+                        create_error_mmap_file(task_id, f"Ошибка при обработке кадров: {e}")
+                    except Exception as e2:
+                        print(f"[Daemon] Не удалось создать mmap файл для индикации ошибки: {e2}", flush=True)
+        except Exception as outer_e:
+            # Перехватываем все исключения, включая те, что произошли до создания mmap_writer
+            print(f"[Daemon] КРИТИЧЕСКАЯ ОШИБКА в потоке обработки кадров (внешний уровень): {outer_e}", flush=True)
             import traceback
             traceback.print_exc()
-            if mmap_writer:
-                mmap_writer.set_error(str(e))
+            # Пытаемся создать mmap файл для индикации ошибки
+            try:
+                create_error_mmap_file(task_id, str(outer_e))
+            except Exception as e2:
+                print(f"[Daemon] Не удалось создать mmap файл для индикации ошибки: {e2}", flush=True)
         finally:
-            if mmap_writer:
-                mmap_writer.close()
+            try:
+                if 'mmap_writer' in locals() and mmap_writer:
+                    mmap_writer.close()
+            except:
+                pass
+            print(f"[Daemon] Поток обработки кадров завершен для task_id={task_id}", flush=True)
     
     def _process_frames_pipeline_webrtc(self, res_frame_queue, video_len, coord_list_cycle, 
                                          frame_list_cycle, mask_list_cycle, mask_coords_list_cycle,
@@ -1744,20 +1795,83 @@ class ModelDaemonService:
             video_num = len(whisper_chunks)
             print(f"[Daemon] Будет сгенерировано {video_num} кадров для WebRTC (файловый режим)", flush=True)
             
+            # Проверяем, что frame_list_cycle не пуст перед запуском потока
+            if len(frame_list_cycle) == 0:
+                error_msg = f"[Daemon] КРИТИЧЕСКАЯ ОШИБКА: frame_list_cycle пуст для task_id={task_id}. Аватар не был подготовлен или загружен неправильно. Путь к аватару: {avatar_base_path}"
+                print(error_msg, flush=True)
+                # Создаем mmap файл с ошибкой, чтобы API мог обнаружить проблему
+                try:
+                    create_error_mmap_file(task_id, error_msg)
+                except Exception as e:
+                    print(f"[Daemon] Не удалось создать mmap файл для индикации ошибки: {e}", flush=True)
+                raise RuntimeError(error_msg)
+            
+            # Проверяем, что video_num > 0
+            if video_num == 0:
+                error_msg = f"[Daemon] КРИТИЧЕСКАЯ ОШИБКА: video_num равен 0 для task_id={task_id}. Нет кадров для генерации (whisper_chunks пуст)."
+                print(error_msg, flush=True)
+                # Создаем mmap файл с ошибкой, чтобы API мог обнаружить проблему
+                try:
+                    create_error_mmap_file(task_id, error_msg)
+                except Exception as e:
+                    print(f"[Daemon] Не удалось создать mmap файл для индикации ошибки: {e}", flush=True)
+                raise RuntimeError(error_msg)
+            
+            print(f"[Daemon] Загружено {len(frame_list_cycle)} кадров аватара для task_id={task_id}", flush=True)
+            
             # Создаем очередь для пайплайнинга
             res_frame_queue = queue.Queue()
             
             # Запускаем поток обработки кадров для WebRTC (mmap режим)
             from musetalk.utils.preprocessing import coord_placeholder
+            from scripts.mmap_frame_buffer import get_mmap_path
+            mmap_file_path = get_mmap_path(task_id)
+            
+            print(f"[Daemon] Запуск потока обработки кадров для task_id={task_id}", flush=True)
+            print(f"[Daemon] Ожидаемый путь к mmap файлу: {mmap_file_path}", flush=True)
+            print(f"[Daemon] Параметры: video_num={video_num}, frame_list_cycle_len={len(frame_list_cycle)}, coord_list_cycle_len={len(coord_list_cycle)}", flush=True)
+            
             process_thread = threading.Thread(
                 target=self._process_frames_pipeline_webrtc_file,
                 args=(
                     res_frame_queue, video_num, coord_list_cycle,
                     frame_list_cycle, mask_list_cycle, mask_coords_list_cycle,
                     coord_placeholder, task_id, stop_flag
-                )
+                ),
+                name=f"WebRTCFrameProcessor-{task_id}"
             )
             process_thread.start()
+            print(f"[Daemon] Поток обработки кадров запущен для task_id={task_id}", flush=True)
+            
+            # Даем потоку время на инициализацию mmap файла
+            mmap_initialized = False
+            for i in range(10):  # Ждем до 5 секунд (10 * 0.5)
+                time.sleep(0.5)
+                if os.path.exists(mmap_file_path):
+                    file_size = os.path.getsize(mmap_file_path)
+                    if file_size > 0:
+                        print(f"[Daemon] Mmap файл успешно создан потоком: {mmap_file_path} (размер: {file_size} байт)", flush=True)
+                        mmap_initialized = True
+                        break
+                if not process_thread.is_alive():
+                    print(f"[Daemon] ПРЕДУПРЕЖДЕНИЕ: Поток обработки кадров завершился до создания mmap файла!", flush=True)
+                    # Создаем mmap файл с ошибкой, чтобы API мог обнаружить проблему
+                    try:
+                        create_error_mmap_file(task_id, error_msg)
+                    except Exception as e:
+                        print(f"[Daemon] Не удалось создать mmap файл для индикации ошибки: {e}", flush=True)
+                    break
+            else:
+                if not os.path.exists(mmap_file_path):
+                    print(f"[Daemon] ПРЕДУПРЕЖДЕНИЕ: Mmap файл не был создан в течение 5 секунд после запуска потока", flush=True)
+                    print(f"[Daemon] Поток все еще работает: {process_thread.is_alive()}", flush=True)
+                    # Если поток еще работает, но файл не создан, возможно, произошла ошибка
+                    # Создаем mmap файл с ошибкой на всякий случай
+                    if not process_thread.is_alive():
+                        try:
+                            create_error_mmap_file(task_id, "Поток обработки кадров завершился до создания mmap файла")
+                        except Exception as e:
+                            print(f"[Daemon] Не удалось создать mmap файл для индикации ошибки: {e}", flush=True)
             
             # Генерация кадров и отправка в очередь
             gen = datagen(

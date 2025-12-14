@@ -31,10 +31,28 @@ STATUS_ERROR = 3
 def get_mmap_dir():
     """Возвращает директорию для mmap файлов (использует /dev/shm на Linux, temp на Windows)"""
     if platform.system() == 'Linux' and os.path.exists('/dev/shm'):
-        return '/dev/shm/musetalk_frames'
+        mmap_dir = '/dev/shm/musetalk_frames'
     else:
         # Используем системную временную директорию
-        return os.path.join(tempfile.gettempdir(), 'musetalk_frames')
+        mmap_dir = os.path.join(tempfile.gettempdir(), 'musetalk_frames')
+    
+    # Убеждаемся, что директория существует и доступна для записи
+    try:
+        os.makedirs(mmap_dir, exist_ok=True)
+        # Проверяем доступность записи
+        test_file = os.path.join(mmap_dir, '.test_write')
+        try:
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+        except Exception as e:
+            print(f"[MmapFrameBuffer] ПРЕДУПРЕЖДЕНИЕ: Директория {mmap_dir} недоступна для записи: {e}", flush=True)
+            raise
+    except Exception as e:
+        print(f"[MmapFrameBuffer] ОШИБКА: Не удалось создать/проверить директорию {mmap_dir}: {e}", flush=True)
+        raise
+    
+    return mmap_dir
 
 
 def get_mmap_path(task_id: str) -> str:
@@ -42,6 +60,40 @@ def get_mmap_path(task_id: str) -> str:
     mmap_dir = get_mmap_dir()
     os.makedirs(mmap_dir, exist_ok=True)
     return os.path.join(mmap_dir, f"frames_{task_id}.mmap")
+
+
+def create_error_mmap_file(task_id: str, error_message: str = "Unknown error"):
+    """
+    Создает mmap файл с правильным заголовком ошибки.
+    Это позволяет API обнаружить проблему и прочитать статус ошибки.
+    
+    Args:
+        task_id: ID задачи
+        error_message: Сообщение об ошибке (для логирования)
+    """
+    mmap_path = get_mmap_path(task_id)
+    try:
+        # Создаем файл с минимальным размером (только заголовок)
+        with open(mmap_path, 'wb') as f:
+            # Записываем правильный заголовок с ошибкой
+            header = struct.pack(
+                HEADER_FORMAT,
+                STATUS_ERROR,      # status
+                0,                 # total_frames
+                0,                 # current_frame
+                0,                 # frame_width
+                0,                 # frame_height
+                0,                 # frame_channels
+                0,                 # frame_size
+                HEADER_SIZE        # header_size
+            )
+            f.write(header)
+        print(f"[MmapFrameBuffer] Создан mmap файл с ошибкой для task_id={task_id}: {mmap_path}", flush=True)
+        print(f"[MmapFrameBuffer] Сообщение об ошибке: {error_message}", flush=True)
+        return mmap_path
+    except Exception as e:
+        print(f"[MmapFrameBuffer] ОШИБКА при создании mmap файла с ошибкой: {e}", flush=True)
+        raise
 
 
 class MmapFrameWriter:
@@ -74,13 +126,35 @@ class MmapFrameWriter:
         self.mmap_path = get_mmap_path(task_id)
         print(f"[MmapFrameWriter] Создание mmap файла для task_id={task_id}: {self.mmap_path}", flush=True)
         
+        # Проверяем, что директория существует
+        mmap_dir = os.path.dirname(self.mmap_path)
+        if not os.path.exists(mmap_dir):
+            error_msg = f"[MmapFrameWriter] ОШИБКА: Директория не существует: {mmap_dir}"
+            print(error_msg, flush=True)
+            raise FileNotFoundError(error_msg)
+        
+        # Проверяем доступность записи в директорию
+        try:
+            test_file = os.path.join(mmap_dir, f'.test_write_{task_id}')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+        except Exception as e:
+            error_msg = f"[MmapFrameWriter] ОШИБКА: Директория {mmap_dir} недоступна для записи: {e}"
+            print(error_msg, flush=True)
+            raise PermissionError(error_msg)
+        
         # Создаем файл нужного размера
         try:
+            print(f"[MmapFrameWriter] Создание файла размером {self.file_size} байт...", flush=True)
             with open(self.mmap_path, 'wb') as f:
                 f.write(b'\x00' * self.file_size)
             print(f"[MmapFrameWriter] Файл создан, размер: {self.file_size} байт", flush=True)
         except Exception as e:
-            print(f"[MmapFrameWriter] ОШИБКА при создании файла: {e}", flush=True)
+            error_msg = f"[MmapFrameWriter] ОШИБКА при создании файла: {e}"
+            print(error_msg, flush=True)
+            import traceback
+            traceback.print_exc()
             raise
         
         # Открываем mmap для записи
