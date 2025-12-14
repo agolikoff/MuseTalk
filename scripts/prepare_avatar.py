@@ -148,15 +148,28 @@ def prepare_avatar(avatar_id, video_path, bbox_shift, version, vae, fp, extra_ma
     
     # Обработка кадров и создание масок
     print("Создание масок...")
+    coord_placeholder = (0.0, 0.0, 0.0, 0.0)
     for i, frame in enumerate(tqdm(frame_list_cycle)):
         cv2.imwrite(f"{full_imgs_path}/{str(i).zfill(8)}.png", frame)
         
         x1, y1, x2, y2 = coord_list_cycle[i]
-        if version == "v15":
-            mode = parsing_mode
+        
+        # Пропускаем кадры с некорректными координатами
+        if (x1, y1, x2, y2) == coord_placeholder:
+            print(f"Предупреждение: кадр {i} имеет некорректные координаты, пропускаем")
+            # Создаем пустую маску для этого кадра
+            mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
+            crop_box = [0, 0, 0, 0]
+        elif x1 >= x2 or y1 >= y2 or x1 < 0 or y1 < 0:
+            print(f"Предупреждение: кадр {i} имеет некорректные координаты (x1={x1}, y1={y1}, x2={x2}, y2={y2}), пропускаем")
+            mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
+            crop_box = [0, 0, 0, 0]
         else:
-            mode = "raw"
-        mask, crop_box = get_image_prepare_material(frame, [x1, y1, x2, y2], fp=fp, mode=mode)
+            if version == "v15":
+                mode = parsing_mode
+            else:
+                mode = "raw"
+            mask, crop_box = get_image_prepare_material(frame, [x1, y1, x2, y2], fp=fp, mode=mode)
         
         cv2.imwrite(f"{mask_out_path}/{str(i).zfill(8)}.png", mask)
         mask_coords_list_cycle += [crop_box]

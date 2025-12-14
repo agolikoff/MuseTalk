@@ -404,6 +404,8 @@
         const TURN_USERNAME = 'webrtc';
         const TURN_CREDENTIAL = 'my_password';
         const DIALOG_ID = '2044c9fd-4f37-433f-b604-48de45c1fba0';
+        const SETTINGS_ID = '1765145591841-i6lqzzwui';
+        
 
         const videoPlayer = document.getElementById('character-avatar-video');
         const staticImage = document.getElementById('character-static-image');
@@ -798,7 +800,8 @@
                 // Collect query parameters
                 const query = {
                     task_id: TASK_ID,
-                    dialog_id: DIALOG_ID
+                    dialog_id: DIALOG_ID,
+                    settings_id: SETTINGS_ID
                 };
 
                 socket = io(WEBSOCKET_SERVER_URL, {
