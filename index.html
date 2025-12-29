@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -35,6 +36,26 @@
             margin: 0 auto;
         }
 
+        /* Fullscreen styles */
+        .real-time-container:fullscreen {
+            background: #000;
+            width: 100vw;
+            height: 100vh;
+            max-width: none;
+            aspect-ratio: unset;
+            display: flex;
+            align-items: center;
+            /* Center content if needed */
+            justify-content: center;
+        }
+
+        /* Support for webkit (Safari/Chrome) specific pseudo-class if standard one acts up, though standard is well supported now */
+        .real-time-container:-webkit-full-screen {
+            background: #000;
+            width: 100%;
+            height: 100%;
+        }
+
         /* Header button group */
         .ah-agent-header {
             display: flex;
@@ -49,7 +70,7 @@
         }
 
         .ah-btn {
-            background: rgba(255, 255, 255, 0.2);
+            background: rgba(200, 200, 200, 0.5);
             border: none;
             border-radius: 50%;
             width: 40px;
@@ -138,9 +159,12 @@
         }
 
         @keyframes pulse {
-            0%, 100% {
+
+            0%,
+            100% {
                 transform: scale(1);
             }
+
             50% {
                 transform: scale(1.1);
             }
@@ -206,6 +230,7 @@
                 opacity: 0;
                 transform: translateY(10px);
             }
+
             to {
                 opacity: 1;
                 transform: translateY(0);
@@ -308,10 +333,14 @@
         }
 
         @keyframes typingAnimation {
-            0%, 60%, 100% {
+
+            0%,
+            60%,
+            100% {
                 transform: translateY(0);
                 opacity: 0.6;
             }
+
             30% {
                 transform: translateY(-8px);
                 opacity: 1;
@@ -353,11 +382,47 @@
                 background: rgba(30, 30, 30, 0.5);
             }
         }
+
+        /* Spinner for button */
+        .ah-spinner {
+            width: 24px;
+            height: 24px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+            display: none;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* Button loading state */
+        .btn-character-call.loading .ah-icon {
+            display: none;
+        }
+
+        .btn-character-call.loading .ah-spinner {
+            display: block;
+        }
     </style>
 </head>
+
 <body>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <div class="real-time-container">
+        <!-- Header -->
+        <div class="ah-agent-header" style="position: absolute; top: 0; right: 0; width: 100%;">
+            <button class="ah-btn" id="btnFullscreen" title="Toggle Fullscreen">
+                <svg class="ah-icon" width="24" height="24" viewBox="0 0 24 24" fill="#fff"
+                    xmlns="http://www.w3.org/2000/svg">
+                    <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" />
+                </svg>
+            </button>
+        </div>
         <!-- character container -->
         <div class="ah-character-box">
             <div class="ah-character-avatar">
@@ -379,9 +444,11 @@
         <!-- Call button -->
         <button class="ah-btn ah-btn-icon btn-character-call" id="btnRealtime">
             <svg class="ah-icon" width="22" height="22" viewBox="0 0 24 24" fill="#fff"
-                 xmlns="http://www.w3.org/2000/svg">
-                <path d="M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z"/>
+                xmlns="http://www.w3.org/2000/svg">
+                <path
+                    d="M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z" />
             </svg>
+            <div class="ah-spinner"></div>
         </button>
     </div>
 
@@ -391,21 +458,21 @@
         const WEBSOCKET_PATH = '/api-voice/socket.io';
         const AUTH_TOKEN = 'sk_live_h8mvwCjYP3hIzpxziW4Ey00GWfWfOtQfju13_uGAzWA';
         const LANGUAGE_CODE = 'en-US'; // 'en-US' or 'ru-RU'
-        
+
         // WebRTC settings (from test file)
         const WEBRTC_API_URL = 'https://avatar.stacqan.com/api-rtc';
         const TASK_ID = 'couch_ashley';
         const VIDEO_PATH = 'data/video/couch_ashley.mp4';
         const AUDIO_PATH = 'data/audio/test.wav';
         const VERSION = 'v15';
-        const FPS = 15;
-        const BATCH_SIZE = 12;
+        const FPS = 12;
+        const BATCH_SIZE = 8;
         const TURN_SERVER_URL = '';
         const TURN_USERNAME = 'webrtc';
         const TURN_CREDENTIAL = 'my_password';
-        const DIALOG_ID = '2044c9fd-4f37-433f-b604-48de45c1fba0';
+        const DIALOG_ID = 'ea8f6df4-76b8-41f8-a9f9-4ee4d27ebbe3';
         const SETTINGS_ID = '1765145591841-i6lqzzwui';
-        
+
 
         const videoPlayer = document.getElementById('character-avatar-video');
         const staticImage = document.getElementById('character-static-image');
@@ -426,11 +493,13 @@
         let audioContext = null;
         let audioStream = null;
         let processor = null;
+
         let isRecording = false;
         let recognitionActive = false;
         let recordingStartTime = null;
         let timerInterval = null;
-        
+        let socketConnectionPromise = null; // Track connection progress
+
         // WebRTC
         let pc = null; // WebRTC peer connection
         let isWebRTCConnected = false;
@@ -439,7 +508,29 @@
         let isReconnecting = false;
         let reconnectTimeout = null;
         let connectingTimeout = null;
-        const CONNECTING_TIMEOUT_MS = 3000; // 10 seconds
+        const CONNECTING_TIMEOUT_MS = 5000; // 5 seconds
+
+        // Helper to wait for ICE gathering to complete
+        function waitForIceGathering(pc) {
+            return new Promise((resolve) => {
+                if (pc.iceGatheringState === 'complete') {
+                    resolve();
+                } else {
+                    function checkState() {
+                        if (pc.iceGatheringState === 'complete') {
+                            pc.removeEventListener('icegatheringstatechange', checkState);
+                            resolve();
+                        }
+                    }
+                    pc.addEventListener('icegatheringstatechange', checkState);
+                    // Fallback timeout in case ICE gathering takes too long
+                    setTimeout(() => {
+                        pc.removeEventListener('icegatheringstatechange', checkState);
+                        resolve();
+                    }, 2000); // 2 second max wait for candidates
+                }
+            });
+        }
 
         // Initialize WebRTC streaming
         async function initWebRTCStreaming() {
@@ -454,7 +545,7 @@
                     { urls: 'stun:stun1.l.google.com:19302' },
                     { urls: 'stun:stun2.l.google.com:19302' }
                 ];
-                
+
                 // Add TURN server if specified
                 if (TURN_SERVER_URL && TURN_USERNAME && TURN_CREDENTIAL) {
                     const turnUrls = [TURN_SERVER_URL];
@@ -489,7 +580,7 @@
                         }
                     );
                 }
-                
+
                 // Create RTCPeerConnection
                 pc = new RTCPeerConnection({
                     iceServers: iceServers,
@@ -537,13 +628,13 @@
 
                 pc.onconnectionstatechange = () => {
                     console.log(`Connection state: ${pc.connectionState}`);
-                    
+
                     // Clear connecting timeout on any state change
                     if (connectingTimeout) {
                         clearTimeout(connectingTimeout);
                         connectingTimeout = null;
                     }
-                    
+
                     if (pc.connectionState === 'connected') {
                         // Reset counter on successful connection
                         reconnectAttempts = 0;
@@ -563,7 +654,7 @@
                             console.log(`Connection timeout: connecting state exceeded ${CONNECTING_TIMEOUT_MS}ms, reconnecting...`);
                             showStatus('Connection timeout, reconnecting...', 'error');
                             connectingTimeout = null;
-                            
+
                             // Close current connection
                             if (pc) {
                                 try {
@@ -573,7 +664,7 @@
                                 }
                                 pc = null;
                             }
-                            
+
                             // Clear video stream
                             if (videoPlayer && videoPlayer.srcObject) {
                                 videoPlayer.srcObject.getTracks().forEach(track => track.stop());
@@ -584,10 +675,10 @@
                             if (staticImage) {
                                 staticImage.style.display = 'block';
                             }
-                            
+
                             // Disconnect WebSocket
                             disconnectWebSocket();
-                            
+
                             // Try to reconnect
                             if (!isReconnecting && reconnectAttempts < maxReconnectAttempts) {
                                 attemptReconnect();
@@ -625,7 +716,7 @@
                         }
                         videoPlayer.style.display = 'block';
                         showStatus('Video stream received', 'success');
-                        
+
                         videoPlayer.onloadedmetadata = async () => {
                             console.log(`Video metadata: ${videoPlayer.videoWidth}x${videoPlayer.videoHeight}`);
                             // Force play after metadata is loaded
@@ -651,11 +742,11 @@
                                 document.addEventListener('touchstart', startPlayback, { once: true });
                             }
                         };
-                        
+
                         videoPlayer.onplay = () => {
                             console.log('Video playback started');
                         };
-                        
+
                         videoPlayer.onerror = (e) => {
                             console.error('Video error:', e);
                             showStatus('Video playback error', 'error');
@@ -676,8 +767,14 @@
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
 
+                // WAIT for ICE gathering to complete before sending offer
+                showStatus('Gathering ICE candidates...', 'loading');
+                console.log('Waiting for ICE gathering to complete...');
+                await waitForIceGathering(pc);
+                console.log('ICE gathering complete, sending offer with candidates');
+
                 console.log('Sending offer to server...');
-                
+
                 // Send offer to server
                 const response = await fetch(`${WEBRTC_API_URL}/api/webrtc/offer`, {
                     method: 'POST',
@@ -685,8 +782,8 @@
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        sdp: offer.sdp,
-                        type: offer.type,
+                        sdp: pc.localDescription.sdp, // Use localDescription which contains candidates
+                        type: pc.localDescription.type,
                         task_id: TASK_ID,
                         video_path: VIDEO_PATH,
                         audio_path: AUDIO_PATH,
@@ -725,19 +822,19 @@
             if (isReconnecting) {
                 return; // Reconnection already in progress
             }
-            
+
             isReconnecting = true;
             reconnectAttempts++;
-            
+
             console.log(`Reconnection attempt ${reconnectAttempts}/${maxReconnectAttempts}...`);
             showStatus(`Reconnection attempt ${reconnectAttempts}/${maxReconnectAttempts}...`, 'loading');
-            
+
             // Clear connecting timeout
             if (connectingTimeout) {
                 clearTimeout(connectingTimeout);
                 connectingTimeout = null;
             }
-            
+
             // Close current connection
             if (pc) {
                 try {
@@ -747,7 +844,7 @@
                 }
                 pc = null;
             }
-            
+
             // Clear video stream
             if (videoPlayer && videoPlayer.srcObject) {
                 videoPlayer.srcObject.getTracks().forEach(track => track.stop());
@@ -758,11 +855,11 @@
             if (staticImage) {
                 staticImage.style.display = 'block';
             }
-            
+
             // Exponential delay before reconnection (maximum 10 seconds)
             const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000);
             console.log(`Waiting ${delay}ms before reconnection...`);
-            
+
             reconnectTimeout = setTimeout(async () => {
                 try {
                     await initWebRTCStreaming();
@@ -781,90 +878,106 @@
             }, delay);
         }
 
-        // Initialize on page load
-        initWebRTCStreaming();
+        // Initialize on page load - REMOVED automatic init, now handling via button
+        // initWebRTCStreaming();
 
         // WebSocket connection for speech recognition
-        async function connectWebSocket() {
+        function connectWebSocket() {
             // Check that WebRTC connection is established
             if (!isWebRTCConnected) {
                 console.log('WebSocket: WebRTC not connected yet, skipping WebSocket connection');
-                return;
+                return Promise.resolve();
             }
 
             if (socket && socket.connected) {
-                return;
+                return Promise.resolve();
             }
 
-            try {
-                // Collect query parameters
-                const query = {
-                    task_id: TASK_ID,
-                    dialog_id: DIALOG_ID,
-                    settings_id: SETTINGS_ID
-                };
-
-                socket = io(WEBSOCKET_SERVER_URL, {
-                    path: WEBSOCKET_PATH,
-                    auth: {
-                        token: AUTH_TOKEN
-                    },
-                    query: query,
-                    transports: ['websocket', 'polling']
-                });
-
-                socket.on('connect', () => {
-                    console.log('WebSocket connected');
-                    showStatus('WebSocket connected', 'success');
-                });
-
-                socket.on('disconnect', () => {
-                    console.log('WebSocket disconnected');
-                    showStatus('WebSocket disconnected', 'error');
-                    if (isRecording) {
-                        stopRecording();
-                    }
-                });
-
-                socket.on('connect_error', (error) => {
-                    console.error('WebSocket connection error:', error);
-                    showStatus('WebSocket connection error: ' + error.message, 'error');
-                });
-
-                socket.on('recognition-started', (data) => {
-                    console.log('Recognition started:', data);
-                    recognitionActive = true;
-                    showStatus('Recognition started', 'success');
-                });
-
-                socket.on('recognition-result', (data) => {
-                    console.log('Recognition result:', data);
-                    // Can add recognition results display
-                });
-
-                socket.on('recognition-error', (data) => {
-                    console.error('Recognition error:', data);
-                    showStatus('Recognition error: ' + data.message, 'error');
-                    if (isRecording) {
-                        stopRecording();
-                    }
-                });
-
-                socket.on('recognition-stopped', (data) => {
-                    console.log('Recognition stopped:', data);
-                    recognitionActive = false;
-                    showStatus('Recognition stopped', 'success');
-                });
-
-            } catch (error) {
-                console.error('Error connecting WebSocket:', error);
-                showStatus('Connection error: ' + error.message, 'error');
+            // Return existing promise if already connecting
+            if (socketConnectionPromise) {
+                return socketConnectionPromise;
             }
+
+            socketConnectionPromise = new Promise((resolve, reject) => {
+                try {
+                    // Collect query parameters
+                    const query = {
+                        task_id: TASK_ID,
+                        dialog_id: DIALOG_ID,
+                        settings_id: SETTINGS_ID
+                    };
+
+                    socket = io(WEBSOCKET_SERVER_URL, {
+                        path: WEBSOCKET_PATH,
+                        auth: {
+                            token: AUTH_TOKEN
+                        },
+                        query: query,
+                        transports: ['websocket', 'polling']
+                    });
+
+                    socket.on('connect', () => {
+                        console.log('WebSocket connected');
+                        showStatus('WebSocket connected', 'success');
+                        resolve();
+                    });
+
+                    socket.on('disconnect', () => {
+                        console.log('WebSocket disconnected');
+                        showStatus('WebSocket disconnected', 'error');
+                        socketConnectionPromise = null; // Reset promise on disconnect
+                        if (isRecording) {
+                            stopRecording();
+                        }
+                    });
+
+                    socket.on('connect_error', (error) => {
+                        console.error('WebSocket connection error:', error);
+                        showStatus('WebSocket connection error: ' + error.message, 'error');
+                        socketConnectionPromise = null; // Reset promise on error
+                        reject(error);
+                    });
+
+                    socket.on('recognition-started', (data) => {
+                        console.log('Recognition started:', data);
+                        recognitionActive = true;
+                        showStatus('Recognition started', 'success');
+                    });
+
+                    socket.on('recognition-result', (data) => {
+                        console.log('Recognition result:', data);
+                        // Can add recognition results display
+                    });
+
+                    socket.on('recognition-error', (data) => {
+                        console.error('Recognition error:', data);
+                        showStatus('Recognition error: ' + data.message, 'error');
+                        if (isRecording) {
+                            stopRecording();
+                        }
+                    });
+
+                    socket.on('recognition-stopped', (data) => {
+                        console.log('Recognition stopped:', data);
+                        recognitionActive = false;
+                        showStatus('Recognition stopped', 'success');
+                    });
+
+                } catch (error) {
+                    console.error('Error connecting WebSocket:', error);
+                    showStatus('Connection error: ' + error.message, 'error');
+                    socketConnectionPromise = null;
+                    reject(error);
+                }
+            });
+
+            return socketConnectionPromise;
         }
 
         // Disconnect WebSocket
         function disconnectWebSocket() {
             if (socket) {
+                socketConnectionPromise = null;
                 if (isRecording) {
                     stopRecording();
                 }
@@ -876,12 +989,58 @@
 
         // Audio recording with continuous WebSocket streaming
         recordButton.addEventListener('click', async () => {
-            if (!isRecording) {
-                await startRecording();
-            } else {
+            if (isRecording) {
                 stopRecording();
+                return;
+            }
+
+            // Check if we need to connect first
+            if (!isWebRTCConnected) {
+                try {
+                    setButtonLoading(true);
+                    await initWebRTCStreaming();
+                    // After successful connection, start recording
+                    await startRecording();
+                } catch (error) {
+                    console.error('Connection failed:', error);
+                    showStatus('Connection failed', 'error');
+                } finally {
+                    setButtonLoading(false);
+                }
+            } else {
+                // Already connected, just start recording
+                await startRecording();
             }
         });
+
+        function setButtonLoading(isLoading) {
+            if (isLoading) {
+                recordButton.classList.add('loading');
+                recordButton.disabled = true;
+            } else {
+                recordButton.classList.remove('loading');
+                recordButton.disabled = false;
+            }
+        }
+
+        // Helper function for cross-browser getUserMedia
+        function getUserMedia(constraints) {
+            // Check if navigator.mediaDevices is defined
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                return navigator.mediaDevices.getUserMedia(constraints);
+            }
+
+            // Legacy/Polyfill
+            const getUserMediaPrefixed = navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia;
+
+            if (getUserMediaPrefixed) {
+                return new Promise((resolve, reject) => {
+                    getUserMediaPrefixed.call(navigator, constraints, resolve, reject);
+                });
+            }
+
+            return Promise.reject(new Error('getUserMedia is not supported in this browser or environment (MediaDevices API missing).'));
+        }
 
         async function startRecording() {
             // Check that WebRTC connection is established
@@ -892,9 +1051,13 @@
 
             // Connect WebSocket if not connected
             if (!socket || !socket.connected) {
-                await connectWebSocket();
-                // Wait a bit for connection to establish
-                await new Promise(resolve => setTimeout(resolve, 500));
+                try {
+                    await connectWebSocket();
+                } catch (e) {
+                    console.error("Failed to connect WebSocket", e);
+                    showStatus('Failed to connect to recognition server', 'error');
+                    return;
+                }
             }
 
             if (!socket || !socket.connected) {
@@ -903,15 +1066,22 @@
             }
 
             try {
-                // Request microphone access
-                audioStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        channelCount: 1,
-                        sampleRate: 16000,
-                        echoCancellation: true,
-                        noiseSuppression: true,
+                // Request microphone access using a helper to handle compatibility
+                try {
+                    audioStream = await getUserMedia({
+                        audio: {
+                            channelCount: 1,
+                            sampleRate: 16000,
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                        }
+                    });
+                } catch (err) {
+                    if (window.location.protocol === 'http:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+                        throw new Error('Microphone access requires HTTPS. Please serve this page over HTTPS or localhost.');
                     }
-                });
+                    throw err;
+                }
 
                 // Create AudioContext with required sample rate
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({
@@ -919,11 +1089,11 @@
                 });
 
                 const source = audioContext.createMediaStreamSource(audioStream);
-                
+
                 // Create ScriptProcessorNode for audio data processing
                 // bufferSize: 4096 gives approximately 256ms of audio at 16kHz
                 processor = audioContext.createScriptProcessor(4096, 1, 1);
-                
+
                 processor.onaudioprocess = (e) => {
                     if (!isRecording || !socket || !socket.connected || !recognitionActive) {
                         return;
@@ -931,7 +1101,7 @@
 
                     // Get PCM data (Float32Array)
                     const inputData = e.inputBuffer.getChannelData(0);
-                    
+
                     // Convert Float32 (-1.0 to 1.0) to Int16 (-32768 to 32767)
                     const int16Array = new Int16Array(inputData.length);
                     for (let i = 0; i < inputData.length; i++) {
@@ -940,7 +1110,7 @@
                         // Convert to 16-bit integer
                         int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
-                    
+
                     // Send as Uint8Array (bytes)
                     socket.emit('audio-chunk', new Uint8Array(int16Array.buffer));
                 };
@@ -954,7 +1124,7 @@
                 isRecording = true;
                 recordingStartTime = Date.now();
                 recordButton.classList.add('recording', 'active');
-                recordButton.innerHTML = '<svg class="ah-icon" width="22" height="22" viewBox="0 0 22 22" fill="#fff" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="10" height="10" rx="2"/></svg>';
+                recordButton.innerHTML = '<svg class="ah-icon" width="22" height="22" viewBox="0 0 22 22" fill="#fff" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="10" height="10" rx="2"/></svg><div class="ah-spinner"></div>';
                 recordButton.title = 'Click to stop recording';
                 showStatus('🔴 Recording...', 'loading');
                 startTimer();
@@ -966,6 +1136,7 @@
         }
 
         function stopRecording() {
+            // Stop Audio
             if (processor) {
                 processor.disconnect();
                 processor = null;
@@ -985,13 +1156,46 @@
                 socket.emit('stop-recognition');
             }
 
+            // Stop WebRTC
+            if (pc) {
+                try {
+                    pc.close();
+                } catch (e) {
+                    console.error(`Error closing connection: ${e}`);
+                }
+                pc = null;
+            }
+            isWebRTCConnected = false;
+
+            // Clear reconnection timers
+            if (reconnectTimeout) {
+                clearTimeout(reconnectTimeout);
+                reconnectTimeout = null;
+            }
+            if (connectingTimeout) {
+                clearTimeout(connectingTimeout);
+                connectingTimeout = null;
+            }
+            isReconnecting = false;
+            reconnectAttempts = 0;
+
+            // Reset UI
+            if (videoPlayer && videoPlayer.srcObject) {
+                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
+                videoPlayer.srcObject = null;
+                videoPlayer.style.display = 'none';
+            }
+            if (staticImage) {
+                staticImage.style.display = 'block';
+            }
+
             isRecording = false;
             recognitionActive = false;
             recordButton.classList.remove('recording', 'active');
-            recordButton.innerHTML = '<svg class="ah-icon" width="22" height="22" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg"><path d="M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z"/></svg>';
-            recordButton.title = 'Click to start recording';
+            recordButton.innerHTML = '<svg class="ah-icon" width="22" height="22" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg"><path d="M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z"/></svg><div class="ah-spinner"></div>';
+            recordButton.title = 'Click to start';
             stopTimer();
-            showStatus('Recording stopped', 'success');
+            showStatus('Connection and recording stopped', 'success');
         }
 
         function startTimer() {
@@ -1022,7 +1226,7 @@
                 statusDiv.textContent = message;
                 statusDiv.className = 'status-indicator ' + type;
                 statusDiv.style.display = 'block';
-                
+
                 if (type === 'success') {
                     setTimeout(() => {
                         statusDiv.style.display = 'none';
@@ -1039,29 +1243,29 @@
             if (isRecording) {
                 stopRecording();
             }
-            
+
             // Clear connecting timeout
             if (connectingTimeout) {
                 clearTimeout(connectingTimeout);
                 connectingTimeout = null;
             }
-            
+
             // Disconnect WebSocket
             if (socket) {
                 socket.disconnect();
                 socket = null;
             }
-            
+
             // Cancel reconnection if scheduled
             if (reconnectTimeout) {
                 clearTimeout(reconnectTimeout);
                 reconnectTimeout = null;
             }
             isReconnecting = false;
-            
+
             // Disconnect WebSocket
             disconnectWebSocket();
-            
+
             // Close WebRTC connection
             if (pc) {
                 pc.close();
@@ -1076,13 +1280,48 @@
             if (staticImage) {
                 staticImage.style.display = 'block';
             }
-            
+
             // Stop audio stream
             if (audioStream) {
                 audioStream.getTracks().forEach(track => track.stop());
                 audioStream = null;
             }
         });
+        // Fullscreen Logic
+        const container = document.querySelector('.real-time-container');
+        const fullscreenBtn = document.getElementById('btnFullscreen');
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                container.requestFullscreen().catch(err => {
+                    console.error(`Error attempting to enable fullscreen: ${err.message}`);
+                });
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                }
+            }
+        }
+
+        function updateFullscreenIcon() {
+            if (document.fullscreenElement) {
+                // Change to Minimize icon (Exit Fullscreen)
+                fullscreenBtn.innerHTML = `
+                <svg class="ah-icon" width="24" height="24" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/>
+                </svg>`;
+            } else {
+                // Change to Maximize icon (Enter Fullscreen)
+                fullscreenBtn.innerHTML = `
+                <svg class="ah-icon" width="24" height="24" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
+                </svg>`;
+            }
+        }
+
+        fullscreenBtn.addEventListener('click', toggleFullscreen);
+        document.addEventListener('fullscreenchange', updateFullscreenIcon);
     </script>
 </body>
+
 </html>

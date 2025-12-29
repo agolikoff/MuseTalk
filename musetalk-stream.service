@@ -1,0 +1,35 @@
+[Unit]
+Description=MuseTalk WebRTC Streaming Service
+After=network.target
+
+[Service]
+Type=simple
+
+# Add conda to PATH so "conda run" can be executed
+Environment="PATH=/home/4natic/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Project working directory
+WorkingDirectory=/home/4natic/MuseTalk/
+
+# Run model service startup inside the same conda environment
+ExecStartPre=/home/4natic/miniconda3/bin/conda run -n MuseTalk /bin/bash /home/4natic/MuseTalk/start_model_service.sh v1.5 realtime 0
+
+# Run the script inside the MuseTalk conda environment
+ExecStart=/home/4natic/miniconda3/envs/MuseTalk/bin/python streaming_webrtc_api.py --host 0.0.0.0 --port 8009 --version v15 --gpu_id 0
+
+MemoryHigh=16G
+MemoryMax=18G
+MemoryAccounting=true
+MemorySwapMax=0
+
+# Always restart the service if it crashes or exits
+Restart=always
+RestartSec=3
+
+# Append logs to these files
+StandardOutput=append:/var/log/musetalk-stream.log
+StandardError=append:/var/log/musetalk-stream-error.log
+
+[Install]
+WantedBy=multi-user.target
+
