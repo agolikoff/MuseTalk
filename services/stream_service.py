@@ -746,6 +746,53 @@ class VideoStreamGenerator(VideoStreamTrack):
         logger.info(f"[VideoStreamGenerator] Трек остановлен, очередь очищена, keepalive остановлен")
 
 
+    async def play_video_file(self, video_path: str, fps: int = 25):
+        """
+        Воспроизводит видео из файла в существующий трек.
+        Синхронно читает кадры, но отправляет их с учетом FPS.
+        """
+        if not os.path.exists(video_path):
+            logger.error(f"[StreamService] play_video_file: File not found: {video_path}")
+            return
+
+        logger.info(f"[StreamService] Starting playback from file: {video_path}")
+        cap = cv2.VideoCapture(video_path)
+        
+        frame_interval = 1.0 / fps
+        next_frame_time = time.time()
+        
+        try:
+            while cap.isOpened() and self.running:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Check cancellation?
+                
+                # Send frame
+                self.add_frame(frame)
+                
+                # Pacing
+                next_frame_time += frame_interval
+                wait = next_frame_time - time.time()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                else:
+                    # We are lagging, yield control at least
+                    await asyncio.sleep(0.001)
+                    
+        except asyncio.CancelledError:
+            logger.info("[StreamService] Playback cancelled")
+        except Exception as e:
+            logger.error(f"[StreamService] Error during file playback: {e}")
+        finally:
+            cap.release()
+            # Mark completion
+            with self.generation_completed_lock:
+                self.generation_completed = True
+            
+            logger.info(f"[StreamService] Playback finished for {video_path}")
+
 class StreamService:
     """Сервис для управления медиа-потоками"""
     

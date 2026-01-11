@@ -4,8 +4,13 @@
 Модели загружаются один раз при старте и остаются в памяти.
 Сервис следит за директорией запросов и обрабатывает их по мере поступления.
 """
-import os
+import signal
 import sys
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+import os
 import json
 import time
 import argparse
@@ -70,7 +75,7 @@ class ModelDaemonService:
                  ffmpeg_path="./ffmpeg-4.4-amd64-static/",
                  left_cheek_width=90, right_cheek_width=90,
                  request_dir="./requests", result_dir="./results",
-                 skip_model_loading=False, redis_host="localhost", redis_port=6379):
+                 skip_model_loading=False, redis_host="localhost", redis_port=6379, redis_password=None):
         self.version = version
         self.gpu_id = gpu_id
         self.use_float16 = use_float16
@@ -121,14 +126,35 @@ class ModelDaemonService:
         # Redis initialization
         self.redis_host = redis_host
         self.redis_port = redis_port
-        self.redis = None
+        self.redis_password = redis_password
+        self.redis_client = None
+        
+        # Управление активными задачами для прерывания
+        self.active_tasks = {} # task_id -> threading.Event
+        self.active_tasks_lock = threading.Lock()
+
+        # Initial Redis connection attempt
+        self.redis_client = self._connect_to_redis()
+        
+    def _connect_to_redis(self):
+        """Пытается подключиться к Redis и возвращает клиент или None"""
         try:
-            self.redis = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
-            self.redis.ping()
-            print(f"[Daemon] Подключено к Redis: {redis_host}:{redis_port}")
+            client = None
+            # Check for REDIS_URL first
+            redis_url = os.getenv("REDIS_URL")
+            if redis_url:
+                 client = redis.from_url(redis_url)
+                 print(f"[Daemon] Подключено к Redis через URL")
+            else:
+                print(f"[Daemon] Подключение к Redis {self.redis_host}:{self.redis_port}...")
+                client = redis.Redis(host=self.redis_host, port=self.redis_port, password=self.redis_password, decode_responses=True)
+            
+            client.ping()
+            print(f"[Daemon] Успешное подключение к Redis!")
+            return client
         except Exception as e:
-            print(f"[Daemon] Ошибка подключения к Redis: {e}. Будет использоваться только файловый режим.")
-            self.redis = None
+            print(f"[Daemon] Ошибка подключения к Redis: {e}. Будет использоваться только файловый режим (до восстановления связи).")
+            return None
         
         # Кеш для материалов аватаров (загруженных в память)
         # Ключ: task_id, значение: словарь с материалами
@@ -722,15 +748,31 @@ class ModelDaemonService:
             except Exception as e:
                 print(f"[Daemon] Ошибка при отправке последнего сегмента: {e}")
     
-    def process_config(self, inference_config, source_id, is_file=False, restart_count=0, max_restarts=1):
+    def process_config(self, inference_config, source_id, is_file=False, restart_count=0, max_restarts=1, stop_event=None):
         """
         Обрабатывает конфигурацию инференса (словарь).
         Core logic extraction from process_request.
         """
+        # Если передан stop_event, регистрируем его под всеми task_id из конфига
+        # (обычно task_id один, но на всякий случай)
+        registered_tasks = []
+        if stop_event:
+            for task_id in inference_config:
+                 if task_id not in ["audio_padding_length_left", "audio_padding_length_right", 
+                                  "batch_size", "fps", "extra_margin", "parsing_mode",
+                                  "use_saved_coord", "saved_coord", "result_dir", "webrtc_mode"]:
+                    with self.active_tasks_lock:
+                        self.active_tasks[task_id] = stop_event
+                        registered_tasks.append(task_id)
+
         with self.lock:
             try:
                 request_start = time.perf_counter()
                 print(f"[Daemon] Обработка конфигурации: {source_id}", flush=True)
+                
+                if stop_event and stop_event.is_set():
+                        print(f"[Daemon] Заранее получен сигнал остановки для {source_id}, пропускаем", flush=True)
+                        return
 
                 audio_padding_length_left = inference_config.get("audio_padding_length_left", 2)
                 audio_padding_length_right = inference_config.get("audio_padding_length_right", 2)
@@ -780,7 +822,7 @@ class ModelDaemonService:
                                     fps=fps,
                                     extra_margin=extra_margin,
                                     parsing_mode=parsing_mode,
-                                    stop_flag=None
+                                    stop_flag=stop_event
                                 )
                                 print(f"[Daemon] WebRTC обработка задачи {task_id} завершена успешно", flush=True)
                             except Exception as e:
@@ -948,6 +990,12 @@ class ModelDaemonService:
                 print(f"[Daemon] Критическая ошибка process_config: {e}")
                 import traceback
                 traceback.print_exc()
+        # Очистка зарегистрированных задач
+        if stop_event and registered_tasks:
+                with self.active_tasks_lock:
+                    for t_id in registered_tasks:
+                        if t_id in self.active_tasks and self.active_tasks[t_id] == stop_event:
+                             del self.active_tasks[t_id]
 
     def process_request(self, config_path, restart_count=0, max_restarts=1):
         """
@@ -1684,7 +1732,7 @@ class ModelDaemonService:
                     print(f"[Daemon] ПРЕДУПРЕЖДЕНИЕ: Поток обработки кадров завершился до создания mmap файла!", flush=True)
                     # Создаем mmap файл с ошибкой, чтобы API мог обнаружить проблему
                     try:
-                        create_error_mmap_file(task_id, error_msg)
+                        create_error_mmap_file(task_id, "Поток обработки кадров завершился до создания mmap файла")
                     except Exception as e:
                         print(f"[Daemon] Не удалось создать mmap файл для индикации ошибки: {e}", flush=True)
                     break
@@ -1859,7 +1907,7 @@ class ModelDaemonService:
     def run(self):
         """Запускает демон-сервис"""
         print(f"[Daemon] Сервис запущен.", flush=True)
-        if self.redis:
+        if self.redis_client:
             print(f"[Daemon] Режим работы: Redis очередь (musetalk:queue) + Файлы", flush=True)
         else:
              print(f"[Daemon] Режим работы: Только Файлы ({self.request_dir})", flush=True)
@@ -1869,19 +1917,41 @@ class ModelDaemonService:
         # Обрабатываем существующие файлы
         self._check_for_new_configs()
         
+        last_redis_reconnect_attempt = 0
+        redis_reconnect_interval = 5  # секунд
+
         try:
             while True:
+                # 0. Попытка переподключения к Redis, если не подключено
+                if self.redis_client is None:
+                    current_time = time.time()
+                    if current_time - last_redis_reconnect_attempt > redis_reconnect_interval:
+                        last_redis_reconnect_attempt = current_time
+                        self.redis_client = self._connect_to_redis()
+
                 # 1. Проверяем Redis (приоритет)
-                if self.redis:
+                if self.redis_client:
                     try:
                         # Используем таймаут 1 секунду, чтобы успевать проверять файлы (если нужно)
-                        task = self.redis.blpop("musetalk:queue", timeout=1)
+                        task = self.redis_client.blpop("musetalk:queue", timeout=1)
                         if task:
                             # task is tuple (queue_name, data)
                             queue_name, data_str = task
                             print(f"[Daemon] Получена задача из Redis!", flush=True)
                             try:
                                 config_data = json.loads(data_str)
+                                if "command" in config_data and config_data["command"] == "stop":
+                                    stop_task_id = config_data.get("task_id")
+                                    if stop_task_id:
+                                        print(f"[Daemon] Получена команда STOP для {stop_task_id}", flush=True)
+                                        with self.active_tasks_lock:
+                                            if stop_task_id in self.active_tasks:
+                                                self.active_tasks[stop_task_id].set()
+                                                print(f"[Daemon] Сигнал остановки отправлен задаче {stop_task_id}", flush=True)
+                                            else:
+                                                print(f"[Daemon] Задача {stop_task_id} не найдена в активных", flush=True)
+                                    continue
+                                
                                 # Генерируем ID для логов
                                 task_id = "unknown"
                                 # Пытаемся найти task_id в ключах (обычно там один ключ с task_id)
@@ -1890,24 +1960,28 @@ class ModelDaemonService:
                                         task_id = k
                                         break
                                 
+                                # Создаем event для остановки
+                                stop_event = threading.Event()
+                                
                                 # Запускаем обработку в отдельном потоке (как и было для файлов)
                                 # Но process_config блокирует через lock.
                                 # В оригинале process_request запускался в Thread.
-                                threading.Thread(target=self.process_config, args=(config_data, f"redis_{task_id}"), daemon=True).start()
+                                threading.Thread(target=self.process_config, args=(config_data, f"redis_{task_id}", False, 0, 1, stop_event), daemon=True).start()
                                 
                             except json.JSONDecodeError:
                                 print(f"[Daemon] Ошибка декодирования JSON из Redis: {data_str}")
                             except Exception as e:
                                 print(f"[Daemon] Ошибка обработки задачи из Redis: {e}")
                     except redis.RedisError as e:
-                        print(f"[Daemon] Ошибка Redis: {e}. Пауза 5 сек.")
-                        time.sleep(5)
+                        print(f"[Daemon] Ошибка Redis: {e}. Переключение в режим переподключения.")
+                        self.redis_client = None
+                        last_redis_reconnect_attempt = time.time() # Сразу не долбить
                 
                 # 2. Проверяем файлы (как резерв)
                 self._check_for_new_configs()
                 
-                if not self.redis:
-                    time.sleep(2) # Если без редиса, спим дольше
+                if not self.redis_client:
+                    time.sleep(1) # Если без редиса, спим
                     
         except KeyboardInterrupt:
             print("\n[Daemon] Остановка сервиса...")
@@ -1927,8 +2001,9 @@ def main():
     parser.add_argument("--right_cheek_width", type=int, default=90, help="Ширина правой щеки")
     parser.add_argument("--request_dir", type=str, default="./requests", help="Директория для запросов")
     parser.add_argument("--result_dir", type=str, default="./results", help="Директория для результатов")
-    parser.add_argument("--redis_host", type=str, default="localhost", help="Хост Redis")
-    parser.add_argument("--redis_port", type=int, default=6379, help="Порт Redis")
+    parser.add_argument("--redis_host", type=str, default=os.getenv("REDIS_HOST", "localhost"), help="Redis host")
+    parser.add_argument("--redis_port", type=int, default=int(os.getenv("REDIS_PORT", 6379)), help="Redis port")
+    parser.add_argument("--redis_password", type=str, default=os.getenv("REDIS_PASSWORD", None), help="Redis password")
     
     args = parser.parse_args()
     
@@ -1948,7 +2023,8 @@ def main():
             request_dir=args.request_dir,
             result_dir=args.result_dir,
             redis_host=args.redis_host,
-            redis_port=args.redis_port
+            redis_port=args.redis_port,
+            redis_password=args.redis_password
         )
         
         # Запуск сервиса
