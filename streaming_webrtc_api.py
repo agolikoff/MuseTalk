@@ -9,11 +9,17 @@ import sys
 import json
 import asyncio
 import threading
+import logging
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 import subprocess
 import tempfile
 import yaml
-import logging
 import time
+import hashlib
+import requests
 from typing import Optional, Dict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
@@ -195,6 +201,66 @@ def check_daemon_service(version="v1.5", mode="realtime"):
     except (ValueError, IOError) as e:
         return False, f"Ошибка при чтении PID файла: {e}"
 
+# --- Welcome Video Logic ---
+
+def get_welcome_video_hash(video_path: str, text: str, settings_id: str):
+    """Generates a consistent hash for caching based on video path, text, and settings_id."""
+    # Normalize paths and text to ensure consistency
+    video_path_norm = os.path.normpath(video_path).lower()
+    text_norm = text.strip()
+    settings_id_norm = settings_id.strip()
+    data = f"{video_path_norm}+{text_norm}+{settings_id_norm}"
+    return hashlib.md5(data.encode('utf-8')).hexdigest()
+
+async def ensure_welcome_audio(text: str, hash_str: str, audio_dir: str, settings_id: str):
+        """Checks for existing audio or fetches from TTS."""
+        audio_filename = f"welcome_{hash_str}.wav"
+        audio_path = os.path.join(audio_dir, audio_filename)
+        
+        if os.path.exists(audio_path):
+            logger.info(f"Found cached welcome audio: {audio_path}")
+            return audio_path
+            
+        logger.info(f"Generating welcome audio via TTS for: '{text}' (Settings ID: {settings_id})")
+        
+        tts_token = os.getenv("TTS_AUTH_TOKEN")
+        tts_url = os.getenv("TTS_API_URL")
+        
+        url = f"{tts_url}?settings_id={settings_id}"
+        
+        headers = {
+            'accept': 'audio/wav',
+            'Content-Type': 'application/json'
+        }
+        
+        if tts_token:
+            headers['Authorization'] = f"Bearer {tts_token}"
+            
+        data = {
+            "text": text
+        }
+        
+        try:
+            # Synchronous request in thread executor to avoid blocking loop
+            loop = asyncio.get_event_loop()
+            def fetch_tts():
+                return requests.post(url, headers=headers, json=data, timeout=30)
+            
+            response = await loop.run_in_executor(None, fetch_tts)
+            
+            if response.status_code == 200:
+                with open(audio_path, "wb") as f:
+                    f.write(response.content)
+                logger.info(f"Welcome audio saved to: {audio_path}")
+                return audio_path
+            else:
+                logger.error(f"TTS API Error: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"TTS Request failed: {e}")
+            return None
+
+
 # --- Endpoints ---
 
 @app.post("/api/webrtc/offer")
@@ -249,6 +315,75 @@ async def webrtc_offer(
         # В оригинале использовался костыль с DelayedMediaPlayerTrack
         audio_track = stream_service.create_audio_track(None, video_track)
         pc.addTrack(audio_track)
+        
+        # --- Welcome Video Logic ---
+        welcome_text = os.getenv("VIDEO_HELLO_TEXT")
+        settings_id = os.getenv("TTS_SETTINGS_ID", "1765145591841-i6lqzzwui")
+        
+        # Check if this is a "welcome" scenario (no task_id provided or specific flag? User said "when connecting")
+        # Assuming every new connection is a candidate for welcome video if env is set.
+        
+        did_schedule_welcome = False
+        
+        if welcome_text:
+            try:
+                # Calculate hash
+                welcome_hash = get_welcome_video_hash(video_path, welcome_text, settings_id)
+                
+                # Check for cached VIDEO using the hash (and video ext from video_path)
+                video_ext = os.path.splitext(video_path)[1]
+                cached_video_name = f"cached_{welcome_hash}.mp4" # Force mp4 for output usually
+                cached_video_path = os.path.join("data/video", cached_video_name)
+                os.makedirs("data/video", exist_ok=True) # Ensure dir
+                
+                # Check Audio
+                welcome_audio_path = await ensure_welcome_audio(welcome_text, welcome_hash, config.audio_dir, settings_id)
+                
+                if welcome_audio_path:
+                    if os.path.exists(cached_video_path) and os.path.getsize(cached_video_path) > 0:
+                        logger.info(f"HIT: Playing cached welcome video: {cached_video_path}")
+                        
+                        # Play VIDEO from file
+                        # video_track is an instance of VideoStreamGenerator which now has play_video_file
+                        asyncio.create_task(video_track.play_video_file(cached_video_path, fps=fps))
+                        
+                        # Play AUDIO
+                        # reset_audio_track with new path plays it
+                        stream_service.reset_audio_track(audio_track, new_audio_path=welcome_audio_path)
+                        
+                        did_schedule_welcome = True
+                        
+                    else:
+                        logger.info(f"MISS: Generating welcome video to cache: {cached_video_path}")
+                        
+                        # Start Generation with CAPTURE
+                        # using task_id (we need a unique task id for generation process)
+                        # But we also want to cache it.
+                        
+                        # Play AUDIO
+                        stream_service.reset_audio_track(audio_track, new_audio_path=welcome_audio_path)
+                        
+                        await inference_service.start_generation(
+                            task_id=task_id,
+                            video_track=video_track,
+                            audio_track=audio_track,
+                            video_path=video_path,
+                            audio_path=welcome_audio_path, # TTS audio
+                            fps=fps,
+                            batch_size=batch_size,
+                            version=config.musetalk_version,
+                            has_active_generation=False,
+                            capture_video_path=cached_video_path # Capture for next time
+                        )
+                        did_schedule_welcome = True
+                else:
+                    logger.warning("Could not get welcome audio, skipping welcome video.")
+                    
+            except Exception as e:
+                logger.error(f"Error checking/starting welcome video: {e}", exc_info=True)
+        
+        # ---------------------------
+
         
         # Сохраняем информацию о треках
         connection_manager.update_connection_info(task_id, {
@@ -410,7 +545,8 @@ async def upload_audio_and_generate(
         )
     
     # Сохранение файла
-    timestamp = int(time.time())
+    # Сохранение файла с высокой точностью времени во избежание коллизий
+    timestamp = int(time.time() * 1000000) # Microseconds
     file_extension = os.path.splitext(audio_file.filename)[1] if audio_file.filename else ".wav"
     audio_filename = f"{task_id}_{timestamp}{file_extension}"
     new_audio_path = os.path.join(config.audio_dir, audio_filename)

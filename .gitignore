@@ -18,3 +18,4 @@ exp_out
 .gradio
 /.venv311
 streaming_webrtc_api-old.py
+*.sql

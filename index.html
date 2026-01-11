@@ -408,6 +408,44 @@
         .btn-character-call.loading .ah-spinner {
             display: block;
         }
+
+        /* Speech recognition active state - Moving green border */
+        .btn-character-call.speech-active::before {
+            content: '';
+            position: absolute;
+            top: -6px;
+            left: -6px;
+            right: -6px;
+            bottom: -6px;
+            border-radius: 50%;
+            z-index: -1;
+            background: conic-gradient(from 0deg, transparent 0%, #2ecc71 20%, #2ecc71 40%, transparent 60%);
+            animation: rotate-border 1.5s linear infinite;
+        }
+
+        /* Add a subtle glow for better visibility */
+        .btn-character-call.speech-active::after {
+            content: '';
+            position: absolute;
+            top: -6px;
+            left: -6px;
+            right: -6px;
+            bottom: -6px;
+            border-radius: 50%;
+            z-index: -2;
+            background: rgba(46, 204, 113, 0.3);
+            filter: blur(8px);
+        }
+
+        @keyframes rotate-border {
+            from {
+                transform: rotate(0deg);
+            }
+
+            to {
+                transform: rotate(360deg);
+            }
+        }
     </style>
 </head>
 
@@ -463,6 +501,7 @@
         const WEBRTC_API_URL = 'https://avatar.stacqan.com/api-rtc';
         const TASK_ID = 'couch_ashley';
         const VIDEO_PATH = 'data/video/couch_ashley.mp4';
+        const VIDEO_HELLO_TEXT = 'Hello! How can I support you today?';
         const AUDIO_PATH = 'data/audio/test.wav';
         const VERSION = 'v15';
         const FPS = 12;
@@ -499,6 +538,7 @@
         let recordingStartTime = null;
         let timerInterval = null;
         let socketConnectionPromise = null; // Track connection progress
+        let recognitionBorderTimeout = null; // Timeout for hiding the green border
 
         // WebRTC
         let pc = null; // WebRTC peer connection
@@ -941,17 +981,32 @@
                     socket.on('recognition-started', (data) => {
                         console.log('Recognition started:', data);
                         recognitionActive = true;
+                        // recordButton.classList.add('speech-active'); // Removed: Only show on results
                         showStatus('Recognition started', 'success');
                     });
 
                     socket.on('recognition-result', (data) => {
                         console.log('Recognition result:', data);
-                        // Can add recognition results display
+
+                        // Show active border when receiving results
+                        recordButton.classList.add('speech-active');
+
+                        // Clear existing timeout
+                        if (recognitionBorderTimeout) {
+                            clearTimeout(recognitionBorderTimeout);
+                        }
+
+                        // Hide border after 1 second of no results
+                        recognitionBorderTimeout = setTimeout(() => {
+                            // double check we are still recording before removing, although removing harmlessly
+                            recordButton.classList.remove('speech-active');
+                        }, 1000);
                     });
 
                     socket.on('recognition-error', (data) => {
                         console.error('Recognition error:', data);
                         showStatus('Recognition error: ' + data.message, 'error');
+                        recordButton.classList.remove('speech-active'); // Disable green border
                         if (isRecording) {
                             stopRecording();
                         }
@@ -960,6 +1015,7 @@
                     socket.on('recognition-stopped', (data) => {
                         console.log('Recognition stopped:', data);
                         recognitionActive = false;
+                        recordButton.classList.remove('speech-active'); // Disable green border
                         showStatus('Recognition stopped', 'success');
                     });
 
@@ -1191,7 +1247,13 @@
 
             isRecording = false;
             recognitionActive = false;
-            recordButton.classList.remove('recording', 'active');
+
+            if (recognitionBorderTimeout) {
+                clearTimeout(recognitionBorderTimeout);
+                recognitionBorderTimeout = null;
+            }
+
+            recordButton.classList.remove('recording', 'active', 'speech-active'); // Ensure green border is removed
             recordButton.innerHTML = '<svg class="ah-icon" width="22" height="22" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg"><path d="M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z"/></svg><div class="ah-spinner"></div>';
             recordButton.title = 'Click to start';
             stopTimer();

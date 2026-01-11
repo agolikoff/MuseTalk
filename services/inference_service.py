@@ -7,7 +7,9 @@ import yaml
 import traceback
 from typing import Dict, Optional
 import json
+import json
 import redis
+import cv2
 
 from scripts.mmap_frame_buffer import MmapFrameReader, get_mmap_path
 
@@ -26,22 +28,33 @@ class InferenceService:
         self._generations_lock = asyncio.Lock()
         
         # Redis connection
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        redis_host = os.getenv("REDIS_HOST", "localhost")
+        redis_port = int(os.getenv("REDIS_PORT", 6379))
+        redis_password = os.getenv("REDIS_PASSWORD", None)
+        
+        # Construct URL or use kwargs (Redis-py handles kwargs better for password)
+        # Using URL for consistency if REDIS_URL provided, else build it
+        redis_url = os.getenv("REDIS_URL")
+
         try:
-            self.redis = redis.from_url(redis_url)
+            if redis_url:
+                self.redis = redis.from_url(redis_url)
+            else:
+                self.redis = redis.Redis(host=redis_host, port=redis_port, password=redis_password, decode_responses=True)
+
             self.redis.ping()
-            logger.info(f"Подключено к Redis по адресу {redis_url}")
+            logger.info(f"Подключено к Redis: {redis_host}:{redis_port}")
         except Exception as e:
             logger.error(f"Ошибка подключения к Redis: {e}")
             self.redis = None
         
     async def start_generation(self, task_id: str, video_track, audio_track, video_path: str, audio_path: str, 
-                         fps: int = 25, batch_size: int = 4, version: str = "v1.5", has_active_generation: bool = False):
+                         fps: int = 25, batch_size: int = 4, version: str = "v1.5", has_active_generation: bool = False, capture_video_path: str = None):
         """Запускает процесс генерации в фоновой asyncio задаче"""
         
         # Создаем задачу
         inference_task = asyncio.create_task(
-            self._run_inference(task_id, video_track, audio_track, video_path, audio_path, fps, batch_size, version, has_active_generation)
+            self._run_inference(task_id, video_track, audio_track, video_path, audio_path, fps, batch_size, version, has_active_generation, capture_video_path)
         )
         
         async with self._generations_lock:
@@ -59,7 +72,7 @@ class InferenceService:
             
         return inference_task
 
-    async def _run_inference(self, task_id: str, video_track, audio_track, video_path: str, audio_path: str, fps: int, batch_size: int, version: str, has_active_generation: bool):
+    async def _run_inference(self, task_id: str, video_track, audio_track, video_path: str, audio_path: str, fps: int, batch_size: int, version: str, has_active_generation: bool, capture_video_path: str = None):
         """Внутренняя корутина генерации"""
         mmap_reader = None
         
@@ -80,6 +93,10 @@ class InferenceService:
             # Вместо записи файла отправляем задачу в Redis
             if self.redis:
                 try:
+                    # Проверяем длину очереди для диагностики
+                    queue_len = self.redis.llen("musetalk:queue")
+                    logger.info(f"Текущая длина очереди в Redis: {queue_len}")
+                    
                     # Добавляем данные в очередь
                     # Используем lpush (или rpush)
                     self.redis.rpush("musetalk:queue", json.dumps(config_data))
@@ -99,7 +116,7 @@ class InferenceService:
             
             # # Блокирующая операция ввода-вывода должна быть вынесена в тред, если она долгая, но запись мелкого файла ok.
             # # Для строгости можно использовать run_in_executor
-            # await asyncio.to_thread(self._write_yaml, request_config_path, config_data)
+            # # await asyncio.to_thread(self._write_yaml, request_config_path, config_data)
             
             # os.chmod(request_config_path, 0o644)
             
@@ -109,11 +126,11 @@ class InferenceService:
             
             logger.info(f"Ожидание создания mmap файла: {mmap_file_path}")
             
-            max_wait_for_mmap = 60
+            max_wait_for_mmap = 300 # Увеличено до 5 минут, так как очередь может быть длинной
             wait_start = time.time()
             mmap_created = False
             last_log_time = wait_start
-            log_interval = 5
+            log_interval = 10 # Увеличено до 10 сек, чтобы меньше спамить
             
             while time.time() - wait_start < max_wait_for_mmap:
                 current_time = time.time()
@@ -166,6 +183,16 @@ class InferenceService:
             
             frame_batch = []
             batch_size_send = 8
+
+            # video writer for capture
+            video_writer = None
+            if capture_video_path:
+                try:
+                    # width/height must be known. We can get it from first frame or if known.
+                    # We will init lazily on first frame
+                    logger.info(f"Will capture generated video to: {capture_video_path}")
+                except Exception as e:
+                    logger.error(f"Failed to setup video capture: {e}")
             
             while True:
                 # Проверка отмены задачи
@@ -188,6 +215,25 @@ class InferenceService:
                         frame_array = mmap_reader.read_frame(current_frame_index)
                         if frame_array is not None:
                             frame_batch.append(frame_array)
+                            
+                            # Capture frame
+                            if capture_video_path:
+                                try:
+                                    if video_writer is None:
+                                        h, w = frame_array.shape[:2]
+                                        fourcc = cv2.VideoWriter_fourcc(*'mp4v') # or 'avc1' or 'H264'
+                                        video_writer = cv2.VideoWriter(capture_video_path, fourcc, fps, (w, h))
+                                        logger.info(f"Video writer initialized: {w}x{h} @ {fps}fps")
+                                    
+                                    if video_writer:
+                                        # mmap returns RGB or BGR? 
+                                        # Looking at mmap_frame_buffer.py (not shown but typically RGB/BGR mixup is common). 
+                                        # Assuming BGR for cv2.VideoWriter as is standard for opencv.
+                                        # StreamService converts to YUV420p from BGR24 usually.
+                                        video_writer.write(frame_array)
+                                except Exception as e:
+                                    logger.error(f"Error writing frame to capture file: {e}")
+
                             last_frame_index = current_frame_index
                             current_frame_index += 1
                             
@@ -215,6 +261,11 @@ class InferenceService:
                             frame_array = mmap_reader.read_frame(current_frame_index)
                             if frame_array is not None:
                                 video_track.add_frame(frame_array)
+                                
+                                # Capture remaining frames
+                                if capture_video_path and video_writer:
+                                    video_writer.write(frame_array)
+                                    
                                 last_frame_index = current_frame_index
                             else:
                                 break
@@ -232,6 +283,10 @@ class InferenceService:
                     frame_batch = []
                 
                 await asyncio.sleep(0.01)
+
+            if video_writer:
+                video_writer.release()
+                logger.info(f"Video capture saved to {capture_video_path}")
 
             with video_track.generation_completed_lock:
                 video_track.generation_completed = True
@@ -281,6 +336,15 @@ class InferenceService:
                     del self._active_generations[task_id]
             else:
                 logger.info(f"Генерация не найдена для остановки: task_id={task_id}")
+        
+        # Отправляем сигнал остановки в Redis (чтобы прервать демона)
+        if self.redis:
+            try:
+                stop_cmd = json.dumps({"command": "stop", "task_id": task_id})
+                self.redis.rpush("musetalk:queue", stop_cmd)
+                logger.info(f"Отправлена команда STOP в Redis для task_id={task_id}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки STOP в Redis: {e}")
 
     async def is_generation_active(self, task_id: str) -> bool:
         async with self._generations_lock:
