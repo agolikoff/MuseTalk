@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voice Recording and Video</title>
+    <title>Voice Recording (Audio Only)</title>
     <style>
         /* Base reset and global styles */
         * {
@@ -237,17 +237,6 @@
             }
         }
 
-        /* Video element with aspect ratio 540/960 */
-        #character-avatar-video {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            z-index: 5;
-        }
-
         #character-static-image {
             position: absolute;
             top: 0;
@@ -467,8 +456,7 @@
             <div class="ah-character-avatar">
                 <!-- Static image displayed by default -->
                 <img id="character-static-image" src="avatar.jpg" alt="">
-                <!-- Video playback element (initially hidden) -->
-                <video id="character-avatar-video" autoplay playsinline></video>
+                <!-- Video playback element REMOVED for audio-only mode -->
             </div>
         </div>
 
@@ -511,23 +499,18 @@
         const TURN_SERVER_URL = '';
         const TURN_USERNAME = 'webrtc';
         const TURN_CREDENTIAL = 'my_password';
-        // const DIALOG_ID = 'ea8f6df4-76b8-41f8-a9f9-4ee4d27ebbe3'; // Removed in favor of dynamic dialog creation
         const SETTINGS_ID = '1765145591841-i6lqzzwui';
         const COACH_ID = '5dffbc83-e22b-4b48-8127-a7935bdaa275';
         const USER_ID = 'test';
         let currentDialogId = null;
 
 
-        const videoPlayer = document.getElementById('character-avatar-video');
         const staticImage = document.getElementById('character-static-image');
         const recordButton = document.getElementById('btnRealtime');
         const statusDiv = document.getElementById('status');
         const timerDiv = document.getElementById('timer');
 
-        // Initialize: hide video, show static image
-        if (videoPlayer) {
-            videoPlayer.style.display = 'none';
-        }
+        // Initialize: show static image
         if (staticImage) {
             staticImage.style.display = 'block';
         }
@@ -711,17 +694,6 @@
                                 pc = null;
                             }
 
-                            // Clear video stream
-                            if (videoPlayer && videoPlayer.srcObject) {
-                                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
-                                videoPlayer.srcObject = null;
-                                videoPlayer.style.display = 'none';
-                            }
-                            // Show static image
-                            if (staticImage) {
-                                staticImage.style.display = 'block';
-                            }
-
                             // Disconnect WebSocket
                             disconnectWebSocket();
 
@@ -754,59 +726,28 @@
 
                 pc.ontrack = (event) => {
                     console.log(`Media stream received: ${event.track.kind}`);
-                    if (event.track.kind === 'video') {
-                        videoPlayer.srcObject = event.streams[0];
-                        // Hide static image and show video
-                        if (staticImage) {
-                            //staticImage.style.display = 'none';
+                    // For audio.html, we only care about audio tracks roughly, but we don't need to put them in a video element.
+                    // If audio track is received (which it should), browser handles playing it if we attach it to an audio element or simple logic.
+                    // Wait, in `index.html` audio was also part of `srcObject` of the videoPlayer.
+                    // Here we need an audio element or reusing a hidden video/audio element to play the sound.
+
+                    if (event.track.kind === 'audio') {
+                        // Create a hidden audio element to play the stream
+                        let audioPlayer = document.getElementById('remote-audio');
+                        if (!audioPlayer) {
+                            audioPlayer = document.createElement('audio');
+                            audioPlayer.id = 'remote-audio';
+                            audioPlayer.autoplay = true;
+                            audioPlayer.style.display = 'none';
+                            document.body.appendChild(audioPlayer);
                         }
-                        videoPlayer.style.display = 'block';
-                        showStatus('Video stream received', 'success');
-
-                        videoPlayer.onloadedmetadata = async () => {
-                            console.log(`Video metadata: ${videoPlayer.videoWidth}x${videoPlayer.videoHeight}`);
-                            // Force play after metadata is loaded
-                            try {
-                                await videoPlayer.play();
-                                console.log('Video playback started');
-                            } catch (error) {
-                                console.error('Autoplay failed, user interaction required:', error);
-                                showStatus('Click anywhere to start video playback', 'loading');
-                                // Add click handler to start playback
-                                const startPlayback = async () => {
-                                    try {
-                                        await videoPlayer.play();
-                                        console.log('Video playback started after user interaction');
-                                        showStatus('Video playback started', 'success');
-                                        document.removeEventListener('click', startPlayback);
-                                        document.removeEventListener('touchstart', startPlayback);
-                                    } catch (e) {
-                                        console.error('Playback error:', e);
-                                    }
-                                };
-                                document.addEventListener('click', startPlayback, { once: true });
-                                document.addEventListener('touchstart', startPlayback, { once: true });
-                            }
-                        };
-
-                        videoPlayer.onplay = () => {
-                            console.log('Video playback started');
-                        };
-
-                        videoPlayer.onerror = (e) => {
-                            console.error('Video error:', e);
-                            showStatus('Video playback error', 'error');
-                            // Show static image on error
-                            if (staticImage) {
-                                staticImage.style.display = 'block';
-                            }
-                            videoPlayer.style.display = 'none';
-                        };
+                        audioPlayer.srcObject = event.streams[0];
+                        showStatus('Audio stream received', 'success');
                     }
                 };
 
                 // Add transceivers for receiving video and audio
-                pc.addTransceiver('video', { direction: 'recvonly' });
+                // pc.addTransceiver('video', { direction: 'recvonly' }); // REMOVED FOR AUDIO ONLY
                 pc.addTransceiver('audio', { direction: 'recvonly' });
 
                 // Create offer
@@ -836,7 +777,8 @@
                         version: VERSION,
                         fps: FPS,
                         batch_size: BATCH_SIZE,
-                        video_hello_text: VIDEO_HELLO_TEXT
+                        video_hello_text: VIDEO_HELLO_TEXT,
+                        audio_only: true // ENABLED AUDIO ONLY MODE
                     })
                 });
 
@@ -892,12 +834,13 @@
                 pc = null;
             }
 
-            // Clear video stream
-            if (videoPlayer && videoPlayer.srcObject) {
-                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
-                videoPlayer.srcObject = null;
-                videoPlayer.style.display = 'none';
+            // Clear audio
+            const audioPlayer = document.getElementById('remote-audio');
+            if (audioPlayer && audioPlayer.srcObject) {
+                audioPlayer.srcObject.getTracks().forEach(track => track.stop());
+                audioPlayer.srcObject = null;
             }
+
             // Show static image
             if (staticImage) {
                 staticImage.style.display = 'block';
@@ -942,7 +885,7 @@
                         coach_id: COACH_ID,
                         user_id: USER_ID,
                         metadata: {
-                            source: "video"
+                            source: "audio_only" // Changed source for analytics
                         }
                     }),
                 });
@@ -1245,7 +1188,7 @@
         }
 
         function stopRecording() {
-            // Stop Audio
+            // Stop Audio Rec
             if (processor) {
                 processor.disconnect();
                 processor = null;
@@ -1288,14 +1231,13 @@
             isReconnecting = false;
             reconnectAttempts = 0;
 
-            // Reset UI
-            if (videoPlayer && videoPlayer.srcObject) {
-                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
-                videoPlayer.srcObject = null;
-                videoPlayer.style.display = 'none';
-            }
-            if (staticImage) {
-                staticImage.style.display = 'block';
+            // Simple reset for audio only
+            const audioPlayer = document.getElementById('remote-audio');
+            if (audioPlayer) {
+                if (audioPlayer.srcObject) {
+                    audioPlayer.srcObject.getTracks().forEach(track => track.stop());
+                    audioPlayer.srcObject = null;
+                }
             }
 
             isRecording = false;
@@ -1385,15 +1327,6 @@
             if (pc) {
                 pc.close();
                 pc = null;
-            }
-            if (videoPlayer && videoPlayer.srcObject) {
-                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
-                videoPlayer.srcObject = null;
-                videoPlayer.style.display = 'none';
-            }
-            // Show static image
-            if (staticImage) {
-                staticImage.style.display = 'block';
             }
 
             // Stop audio stream

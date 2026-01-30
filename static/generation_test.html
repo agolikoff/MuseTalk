@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MuseTalk Generation Test</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f0f0f0;
+        }
+
+        .container {
+            display: flex;
+            gap: 20px;
+        }
+
+        .column {
+            flex: 1;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        h2 {
+            margin-top: 0;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+
+        select,
+        input {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        button:disabled {
+            background: #ccc;
+        }
+
+        .result-area {
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        video {
+            max-width: 100%;
+            border-radius: 4px;
+        }
+
+        .status {
+            margin-top: 10px;
+            color: #666;
+        }
+
+        .range-val {
+            float: right;
+            font-weight: normal;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>MuseTalk Generation Parameter Test</h1>
+
+    <div class="container">
+        <div class="column">
+            <h2>Configuration</h2>
+
+            <div class="form-group">
+                <label>Avatar (Video) <button onclick="loadFiles()"
+                        style="width:auto;padding:2px 8px;font-size:12px;float:right">Refresh</button></label>
+                <select id="avatarSelect"></select>
+            </div>
+
+            <div class="form-group">
+                <label>Driver (Audio)</label>
+                <select id="audioSelect"></select>
+            </div>
+
+            <hr>
+
+            <div class="form-group">
+                <label>BBox Shift (px) <span id="bbox_val" class="range-val">0</span></label>
+                <input type="number" id="bbox_shift" value="0" oninput="updateVal('bbox_val', this.value)">
+                <small
+                    title="Adjusts the mouth openness/position. Positive values shift down (more open), negative shift up (less open).">Shift
+                    face bounding box vertically</small>
+            </div>
+
+            <div class="form-group">
+                <label>Extra Margin <span id="margin_val" class="range-val">10</span></label>
+                <input type="range" id="extra_margin" min="0" max="40" value="10"
+                    oninput="updateVal('margin_val', this.value)">
+                <small
+                    title="Adds padding to the cropped face region (lower boundary). Increases chin area included.">Face
+                    crop margin (chin area)</small>
+            </div>
+
+            <div class="form-group">
+                <label>Parsing Mode</label>
+                <select id="parsing_mode">
+                    <option value="jaw">Jaw (Recommended - Blends jaw/chin)</option>
+                    <option value="raw">Raw (Simple paste)</option>
+                    <!--<option value="neck">Neck (Includes neck)</option>-->
+                </select>
+                <small>Blending method for the generated face region.</small>
+            </div>
+
+            <div class="form-group">
+                <label>Left Cheek Width <span id="left_cheek_val" class="range-val">90</span></label>
+                <input type="range" id="left_cheek_width" min="20" max="160" value="90" step="5"
+                    oninput="updateVal('left_cheek_val', this.value)">
+                <small
+                    title="Controls the width of the mask on the left cheek. Higher values mask more of the original cheek.">Mask
+                    width left cheek</small>
+            </div>
+
+            <div class="form-group">
+                <label>Right Cheek Width <span id="right_cheek_val" class="range-val">90</span></label>
+                <input type="range" id="right_cheek_width" min="20" max="160" value="90" step="5"
+                    oninput="updateVal('right_cheek_val', this.value)">
+                <small
+                    title="Controls the width of the mask on the right cheek. Higher values mask more of the original cheek.">Mask
+                    width right cheek</small>
+            </div>
+
+            <button id="generateBtn" onclick="generate()">Generate Video</button>
+            <div id="status" class="status"></div>
+        </div>
+
+        <div class="column">
+            <h2>Result</h2>
+            <div class="result-area" id="resultArea">
+                <p>Generated video will appear here.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function updateVal(id, val) {
+            document.getElementById(id).textContent = val;
+        }
+
+        // Configuration: Set this if API is hosted elsewhere
+        const API_BASE_URL = ''; // e.g. 'http://localhost:8000'
+
+        async function loadFiles() {
+            try {
+                const [avatarsRes, audioRes] = await Promise.all([
+                    fetch(`${API_BASE_URL}/api/files/avatars`),
+                    fetch(`${API_BASE_URL}/api/files/audio`)
+                ]);
+
+                const avatars = await avatarsRes.json();
+                const audio = await audioRes.json();
+
+                const avatarSelect = document.getElementById('avatarSelect');
+                avatarSelect.innerHTML = '';
+                avatars.files.forEach(f => {
+                    const opt = document.createElement('option');
+                    opt.value = f;
+                    opt.textContent = f;
+                    if (f.includes('avatar_1')) opt.selected = true;
+                    avatarSelect.appendChild(opt);
+                });
+
+                const audioSelect = document.getElementById('audioSelect');
+                audioSelect.innerHTML = '';
+                audio.files.forEach(f => {
+                    const opt = document.createElement('option');
+                    opt.value = f;
+                    opt.textContent = f;
+                    if (f.includes('sun')) opt.selected = true;
+                    audioSelect.appendChild(opt);
+                });
+            } catch (e) {
+                console.error("Error loading files", e);
+                document.getElementById('status').textContent = "Error loading file lists. ensure API is running.";
+            }
+        }
+
+        let pollInterval = null;
+
+        async function generate() {
+            // Notify watcher on generation start
+            notifyWatcher();
+
+            const btn = document.getElementById('generateBtn');
+            const status = document.getElementById('status');
+            const resultArea = document.getElementById('resultArea');
+
+            const payload = {
+                video_path: document.getElementById('avatarSelect').value,
+                audio_path: document.getElementById('audioSelect').value,
+                bbox_shift: parseInt(document.getElementById('bbox_shift').value),
+                extra_margin: parseInt(document.getElementById('extra_margin').value),
+                parsing_mode: document.getElementById('parsing_mode').value,
+                left_cheek_width: parseInt(document.getElementById('left_cheek_width').value),
+                right_cheek_width: parseInt(document.getElementById('right_cheek_width').value),
+                fps: 25,
+                batch_size: 4
+            };
+
+            btn.disabled = true;
+            status.textContent = "Starting generation...";
+            resultArea.innerHTML = '<p>Generating...</p>';
+
+            try {
+                const res = await fetch(`${API_BASE_URL}/api/generate_offline`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!res.ok) throw new Error("API Error");
+
+                const data = await res.json();
+                const taskId = data.task_id;
+                status.textContent = `Task started: ${taskId}. Waiting for completion...`;
+
+                if (pollInterval) clearInterval(pollInterval);
+                pollInterval = setInterval(() => checkStatus(taskId), 2000);
+
+            } catch (e) {
+                status.textContent = "Error starting generation: " + e.message;
+                btn.disabled = false;
+            }
+        }
+
+        async function checkStatus(taskId) {
+            try {
+                const res = await fetch(`${API_BASE_URL}/api/result/${taskId}`);
+                const data = await res.json();
+
+                if (data.status === 'completed') {
+                    clearInterval(pollInterval);
+                    document.getElementById('status').textContent = "Generation complete!";
+                    document.getElementById('generateBtn').disabled = false;
+
+                    // If the result URL is relative/local, we might need to prepend base URL if it's on a different domain.
+                    // But usually the API returns a full URL or a relative path from root. 
+                    // If it returns /results/..., prepending API_BASE_URL is safer if hosting separately.
+                    let videoUrl = data.url;
+                    if (API_BASE_URL && videoUrl.startsWith('/')) {
+                        videoUrl = API_BASE_URL + videoUrl;
+                    }
+
+                    document.getElementById('resultArea').innerHTML = `
+                        <video controls autoplay loop src="${videoUrl}"></video>
+                        <p><a href="${videoUrl}" download>Download Video</a></p>
+                    `;
+                } else if (data.status === 'not_found_or_failed') {
+                    // Check if it's too early or failed
+                    // For now assume failed if not processing
+                    // actually status 'processing' means active
+                    // 'not_found_or_failed' means not in active list and file not found
+                    // Could be error.
+                    clearInterval(pollInterval);
+                    document.getElementById('status').textContent = "Generation failed or timed out.";
+                    document.getElementById('generateBtn').disabled = false;
+                }
+            } catch (e) {
+                console.error("Poll error", e);
+            }
+        }
+
+        async function notifyWatcher() {
+            try {
+                console.log("Notifying watcher...");
+                await fetch('https://avatar.stacqan.com/watcher/start', {
+                    method: 'POST'
+                });
+            } catch (e) {
+                console.error("Error notifying watcher", e);
+            }
+        }
+
+        // Init
+        loadFiles();
+        notifyWatcher();
+    </script>
+</body>
+
+</html>

@@ -49,12 +49,13 @@ class InferenceService:
             self.redis = None
         
     async def start_generation(self, task_id: str, video_track, audio_track, video_path: str, audio_path: str, 
-                         fps: int = 25, batch_size: int = 4, version: str = "v1.5", has_active_generation: bool = False, capture_video_path: str = None):
+                         fps: int = 25, batch_size: int = 4, version: str = "v1.5", has_active_generation: bool = False, capture_video_path: str = None,
+                         additional_params: dict = None, initial_delay: float = 0):
         """Запускает процесс генерации в фоновой asyncio задаче"""
         
         # Создаем задачу
         inference_task = asyncio.create_task(
-            self._run_inference(task_id, video_track, audio_track, video_path, audio_path, fps, batch_size, version, has_active_generation, capture_video_path)
+            self._run_inference(task_id, video_track, audio_track, video_path, audio_path, fps, batch_size, version, has_active_generation, capture_video_path, additional_params, initial_delay)
         )
         
         async with self._generations_lock:
@@ -67,27 +68,43 @@ class InferenceService:
                 "audio_path": audio_path,
                 "version": version,
                 "batch_size": batch_size,
-                "fps": fps
+                "fps": fps,
+                "additional_params": additional_params
             }
             
         return inference_task
 
-    async def _run_inference(self, task_id: str, video_track, audio_track, video_path: str, audio_path: str, fps: int, batch_size: int, version: str, has_active_generation: bool, capture_video_path: str = None):
+    async def _run_inference(self, task_id: str, video_track, audio_track, video_path: str, audio_path: str, fps: int, batch_size: int, version: str, has_active_generation: bool, capture_video_path: str = None, additional_params: dict = None, initial_delay: float = 0):
         """Внутренняя корутина генерации"""
         mmap_reader = None
         
         try:
+            if initial_delay > 0:
+                logger.info(f"Ожидание начальной задержки {initial_delay}с для задачи {task_id}...")
+                await asyncio.sleep(initial_delay)
+
             logger.info(f"{'Перезапуск' if has_active_generation else 'Запуск'} генерации видео для task_id={task_id} (через демон, mmap)")
             
             config_data = {
-                "webrtc_mode": True,
+                "webrtc_mode": video_track is not None,
                 "batch_size": batch_size,
                 "fps": fps,
+                # Task specific config
                 task_id: {
                     "video_path": video_path,
                     "audio_path": audio_path
                 }
             }
+            
+            # Добавляем output name для offline генерации чтобы знать куда сохранять
+            if video_track is None:
+                 config_data[task_id]["result_name"] = f"{task_id}.mp4"
+            
+            # Добавляем дополнительные параметры
+            if additional_params:
+                # Top level params in config
+                for k, v in additional_params.items():
+                    config_data[k] = v
             
             
             # Вместо записи файла отправляем задачу в Redis
@@ -244,6 +261,18 @@ class InferenceService:
                                 # Но VideoStreamGenerator использует asyncio.Queue и методы add_frames_batch рассчитаны на вызов из треда.
                                 # Мы можем переписать add_frames_batch чтобы он был async или просто вызывать его.
                                 # В текущей реализации add_frames_batch использует call_soon_threadsafe, что безопасно и из loop'а.
+
+                                if current_frame_index - len(frame_batch) == 0:
+                                     # First batch of this generation. Clear any idle frames.
+                                     q_size = video_track.frame_queue.qsize()
+                                     if q_size > 0:
+                                         logger.info(f"Clearing {q_size} idle frames from queue before starting generation playback")
+                                         while not video_track.frame_queue.empty():
+                                             try:
+                                                 video_track.frame_queue.get_nowait()
+                                             except:
+                                                 break
+                                
                                 video_track.add_frames_batch(frame_batch)
                                 frame_batch = []
                         else:

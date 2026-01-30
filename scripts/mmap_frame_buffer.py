@@ -124,7 +124,6 @@ class MmapFrameWriter:
         
         # Путь к mmap файлу
         self.mmap_path = get_mmap_path(task_id)
-        print(f"[MmapFrameWriter] Создание mmap файла для task_id={task_id}: {self.mmap_path}", flush=True)
         
         # Проверяем, что директория существует
         mmap_dir = os.path.dirname(self.mmap_path)
@@ -135,27 +134,40 @@ class MmapFrameWriter:
         
         # Проверяем доступность записи в директорию
         try:
-            test_file = os.path.join(mmap_dir, f'.test_write_{task_id}')
-            with open(test_file, 'w') as f:
-                f.write('test')
-            os.remove(test_file)
+            # Only check write access if we might need to create/recreate
+            if not os.path.exists(self.mmap_path):
+                 test_file = os.path.join(mmap_dir, f'.test_write_{task_id}')
+                 with open(test_file, 'w') as f:
+                     f.write('test')
+                 os.remove(test_file)
         except Exception as e:
             error_msg = f"[MmapFrameWriter] ОШИБКА: Директория {mmap_dir} недоступна для записи: {e}"
             print(error_msg, flush=True)
             raise PermissionError(error_msg)
         
-        # Создаем файл нужного размера
-        try:
-            print(f"[MmapFrameWriter] Создание файла размером {self.file_size} байт...", flush=True)
-            with open(self.mmap_path, 'wb') as f:
-                f.write(b'\x00' * self.file_size)
-            print(f"[MmapFrameWriter] Файл создан, размер: {self.file_size} байт", flush=True)
-        except Exception as e:
-            error_msg = f"[MmapFrameWriter] ОШИБКА при создании файла: {e}"
-            print(error_msg, flush=True)
-            import traceback
-            traceback.print_exc()
-            raise
+        # Logic for reusing existing file
+        reuse = False
+        if os.path.exists(self.mmap_path):
+            existing_size = os.path.getsize(self.mmap_path)
+            if existing_size == self.file_size:
+                print(f"[MmapFrameWriter] Reusing existing mmap file: {self.mmap_path}", flush=True)
+                reuse = True
+            else:
+                print(f"[MmapFrameWriter] Existing file size mismatch ({existing_size} != {self.file_size}), recreating...", flush=True)
+
+        # Создаем файл нужного размера, если не переиспользуем
+        if not reuse:
+            try:
+                print(f"[MmapFrameWriter] Создание файла размером {self.file_size} байт...", flush=True)
+                with open(self.mmap_path, 'wb') as f:
+                    f.write(b'\x00' * self.file_size)
+                print(f"[MmapFrameWriter] Файл создан, размер: {self.file_size} байт", flush=True)
+            except Exception as e:
+                error_msg = f"[MmapFrameWriter] ОШИБКА при создании файла: {e}"
+                print(error_msg, flush=True)
+                import traceback
+                traceback.print_exc()
+                raise
         
         # Открываем mmap для записи
         try:
@@ -166,10 +178,11 @@ class MmapFrameWriter:
             print(f"[MmapFrameWriter] ОШИБКА при открытии mmap: {e}", flush=True)
             raise
         
-        # Инициализируем заголовок
+        # Инициализируем заголовок (сбрасываем статус даже при переиспользовании)
         self._write_header(STATUS_PROCESSING, 0)
         
-        print(f"[MmapFrameWriter] Создан mmap файл: {self.mmap_path} (размер: {self.file_size} байт)", flush=True)
+        if not reuse:
+             print(f"[MmapFrameWriter] Создан mmap файл: {self.mmap_path} (размер: {self.file_size} байт)", flush=True)
         print(f"[MmapFrameWriter] Кадр: {frame_shape}, размер кадра: {self.frame_size} байт", flush=True)
     
     def _write_header(self, status: int, current_frame: int):

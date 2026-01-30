@@ -78,6 +78,18 @@ class DelayedMediaPlayerTrack(AudioStreamTrack):
         
         # Monotonic PTS counter
         self.next_pts = 0
+        
+        # Buffer for resampled frames
+        from collections import deque
+        self.frame_buffer = deque()
+        self.resampler = None
+        
+        # Pacing
+        self.start_time = None
+        self.samples_sent = 0 # To track time
+        self.pacing_lock = threading.Lock()
+        
+        self.initial_video_frames = 0 # Baseline for AV sync
 
     
     def _create_silence_frame(self, samples=480):
@@ -112,8 +124,19 @@ class DelayedMediaPlayerTrack(AudioStreamTrack):
                 return self._create_silence_frame(480)
 
             self.audio_started = True
+            
+            # Capture baseline video frames
+            if self.video_track and hasattr(self.video_track, 'content_frames_sent'):
+                 with self.video_track.content_frames_lock:
+                     self.initial_video_frames = self.video_track.content_frames_sent
+            
+            # Artificial Delay to compensate for Video Encoding Latency
+            # Audio is much faster to encode/send. Video needs a head start.
+            logger.info(f"[DelayedMediaPlayerTrack] ✓ Audio started. Baseline video frames: {self.initial_video_frames}. Waiting 200ms for video sync...")
+            await asyncio.sleep(0.2)
+            
             self.silence_frames_sent = 0  
-            logger.info(f"[DelayedMediaPlayerTrack] ✓ Аудио синхронизировано с видео (первый реальный кадр отправлен)")
+            logger.info(f"[DelayedMediaPlayerTrack] ✓ Starting audio stream now.")
         
         if self.media_player_ended:
             return self._create_silence_frame(480)
@@ -123,10 +146,14 @@ class DelayedMediaPlayerTrack(AudioStreamTrack):
             # Считаем текущее время аудио (сколько воспроизвели)
             audio_time = self.audio_samples_read / self.sample_rate
             
-            # Считаем текущее время видео (сколько контентных кадров показали)
-            # Используем lock для атомарности, хотя чтение int в python атомарно, но для порядка
+            # Считаем текущее время видео (сколько контентных кадров показали ОТНОСИТЕЛЬНО НАЧАЛА АУДИО)
+            # Используем lock для атомарности
             with self.video_track.content_frames_lock:
-                video_frames = self.video_track.content_frames_sent
+                current_video_frames = self.video_track.content_frames_sent
+            
+            # Relative frames (since speech started)
+            video_frames = current_video_frames - self.initial_video_frames
+            if video_frames < 0: video_frames = 0
             
             video_fps = self.video_track.fps
             video_time = video_frames / video_fps
@@ -141,38 +168,76 @@ class DelayedMediaPlayerTrack(AudioStreamTrack):
         
         if self.media_player and self.media_player.audio:
             try:
-                frame = await self.media_player.audio.recv()
-                self.error_count = 0
+                # --- PACING START ---
+                if self.start_time is None:
+                    self.start_time = time.time()
                 
-                try:
-                    audio_data = frame.to_ndarray()
-                    actual_samples = frame.samples
+                # Expected time based on samples sent (at 48000Hz)
+                # We strictly enforce 48000Hz output now
+                expected_time_offset = self.samples_sent / 48000.0
+                expected_time = self.start_time + expected_time_offset
+                
+                # Wait if we are ahead
+                wait_time = expected_time - time.time()
+                if wait_time > 0:
+                     # Cap max wait to avoid long stalls? 
+                     if wait_time > 0.5: wait_time = 0.5
+                     await asyncio.sleep(wait_time)
+                # --- PACING END ---
+                
+                # 1. Check if we have frames in buffer
+                if self.frame_buffer:
+                     out_frame = self.frame_buffer.popleft()
+                     # Process this frame below
+                else:
+                    # 2. Read new frame from player
+                    frame = await self.media_player.audio.recv()
+                    self.error_count = 0
                     
-                    audio_frame = AudioFrame(format=frame.format.name, 
-                                            layout=frame.layout.name, 
-                                            samples=actual_samples)
-                    audio_frame.sample_rate = self.sample_rate
-                    audio_frame.time_base = self.time_base
+                    # Ensure resampler
+                    if not hasattr(self, 'resampler') or self.resampler is None:
+                        logger.info(f"[DelayedMediaPlayerTrack] INPUT FRAME: rate={frame.sample_rate}, layout={frame.layout.name}, format={frame.format.name}, samples={frame.samples}")
+                        self.resampler = av.AudioResampler(format='s16', layout='stereo', rate=48000)
+                        logger.info(f"[DelayedMediaPlayerTrack] Created AudioResampler: Target 48000Hz, s16, stereo")
+
+                    # Resample
+                    resampled_frames = self.resampler.resample(frame)
                     
-                    audio_frame.planes[0].update(audio_data.tobytes())
-                    
-                    # Overwrite PTS with monotonic counter
-                    audio_frame.pts = self.next_pts
-                    self.next_pts += actual_samples
-                    
-                    self.audio_samples_read += actual_samples
-                    return audio_frame
-                except Exception as copy_error:
-                    # Даже если не смогли конвертировать, мы возвращаем кадр, но PTS все равно надо править?
-                    # Если вернем frame as is, PTS будет кривой. Лучше упасть в exception handler
-                    # Но если очень надо вернуть:
-                    # frame.pts = self.next_pts
-                    # self.next_pts += frame.samples
-                    # self.audio_samples_read += frame.samples
-                    # return frame
-                    logger.warning(f"[DelayedMediaPlayerTrack] Conversion error: {copy_error}")
-                    # Fallback to silence to be safe
-                    return self._create_silence_frame(480)
+                    if not resampled_frames:
+                        # Buffering in resampler? Return silence for now but don't increment audio_samples_read of content?
+                        # Wait, we need to return SOMETHING.
+                        return self._create_silence_frame(480)
+                        
+                    # Add all to buffer
+                    self.frame_buffer.extend(resampled_frames)
+                    out_frame = self.frame_buffer.popleft()
+                
+                audio_data = out_frame.to_ndarray()
+                actual_samples = out_frame.samples
+                
+                # Ensure our track properties stay at 48k
+                self.sample_rate = 48000
+                self.time_base = Fraction(1, 48000)
+                
+                audio_frame = AudioFrame(format='s16', layout='stereo', samples=actual_samples)
+                audio_frame.sample_rate = 48000
+                audio_frame.time_base = Fraction(1, 48000)
+                
+                audio_frame.planes[0].update(audio_data.tobytes())
+                
+                # Overwrite PTS with monotonic counter
+                audio_frame.pts = self.next_pts
+                self.next_pts += actual_samples
+                
+                self.audio_samples_read += actual_samples
+                self.samples_sent += actual_samples
+                
+                return audio_frame
+            except Exception as copy_error:
+                # Log detailed error
+                logger.error(f"[DelayedMediaPlayerTrack] Conversion error: {repr(copy_error)}", exc_info=True)
+                # Fallback to silence to be safe
+                return self._create_silence_frame(480)
 
             except av.EOFError:
                 self.media_player_ended = True
@@ -849,6 +914,18 @@ class StreamService:
             audio_track.last_error_log_time = 0
         if hasattr(audio_track, 'audio_samples_read'):
             audio_track.audio_samples_read = 0
+            
+        if hasattr(audio_track, 'frame_buffer'):
+            audio_track.frame_buffer.clear()
+            
+        if hasattr(audio_track, 'samples_sent'):
+            audio_track.samples_sent = 0
+        if hasattr(audio_track, 'start_time'):
+            audio_track.start_time = None
+        if hasattr(audio_track, 'resampler'):
+            audio_track.resampler = None
+        if hasattr(audio_track, 'initial_video_frames'):
+            audio_track.initial_video_frames = 0
             
         # IMPORTANT: Do NOT reset next_pts. We want strictly monotonic timestamps 
         # to ensure the browser sees a continuous stream of audio.
