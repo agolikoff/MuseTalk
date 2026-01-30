@@ -109,6 +109,9 @@ class AppConfig(BaseModel):
     # Пути
     audio_dir: str = "data/audio"
     requests_dir: str = "./requests"
+    
+    # Custom
+    greeting_delay: float = float(os.getenv("GREETING_DELAY", "0"))
 
 config = AppConfig()
 
@@ -121,6 +124,8 @@ class WebRTCOfferRequest(BaseModel):
     audio_path: Optional[str] = None
     task_id: Optional[str] = None
     version: Optional[str] = None
+    video_hello_text: Optional[str] = None
+    audio_only: bool = False
 
 # Инициализация сервисов
 stream_service = StreamService()
@@ -148,6 +153,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount static directory
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # --- Утилиты ---
 
@@ -214,8 +222,11 @@ def get_welcome_video_hash(video_path: str, text: str, settings_id: str):
 
 async def ensure_welcome_audio(text: str, hash_str: str, audio_dir: str, settings_id: str):
         """Checks for existing audio or fetches from TTS."""
+        welcome_dir = os.path.join(audio_dir, "welcome")
+        os.makedirs(welcome_dir, exist_ok=True)
+
         audio_filename = f"welcome_{hash_str}.wav"
-        audio_path = os.path.join(audio_dir, audio_filename)
+        audio_path = os.path.join(welcome_dir, audio_filename)
         
         if os.path.exists(audio_path):
             logger.info(f"Found cached welcome audio: {audio_path}")
@@ -287,37 +298,54 @@ async def webrtc_offer(
         offer_desc = RTCSessionDescription(sdp=sdp, type=type)
         
         # Создаем PC через менеджер
-        pc = await connection_manager.create_connection(task_id)
+        logger.info(f"Creating connection for {task_id}...")
+        try:
+            pc = await connection_manager.create_connection(task_id)
+        except Exception as e:
+            logger.error(f"Failed to create connection: {e}", exc_info=True)
+            raise e
+        logger.info(f"Connection created: {pc}")
         
         # Создаем медиа треки через StreamService
-        # Для начала только видео, аудио добавим если есть файл воспроизведения (здесь пока нет)
+        # Создаем медиа треки через StreamService
+        
+        video_track = None
         loop = asyncio.get_event_loop()
-        try:
-            logger.info(f"Start creating video track for {video_path}...")
-            start_time = time.time()
-            video_track = stream_service.create_video_track(
-                fps=fps, 
-                loop=loop,
-                # video_width/height will be auto-detected from video_path
-                video_path=video_path
-            )
-            logger.info(f"Video track created in {time.time() - start_time:.3f}s")
-        except Exception as e:
-            logger.error(f"Ошибка при создании видео трека: {e}", exc_info=True)
-            await connection_manager.close_connection(task_id)
-            raise HTTPException(status_code=500, detail=f"Failed to create video track: {e}")
-            
-        pc.addTrack(video_track)
+        if not request.audio_only:
+            try:
+                logger.info(f"Start creating video track for {video_path}...")
+                start_time = time.time()
+                video_track = stream_service.create_video_track(
+                    fps=fps, 
+                    loop=loop,
+                    # video_width/height will be auto-detected from video_path
+                    video_path=video_path
+                )
+                logger.info(f"Video track created in {time.time() - start_time:.3f}s")
+                pc.addTrack(video_track)
+            except Exception as e:
+                logger.error(f"Ошибка при создании видео трека: {e}", exc_info=True)
+                await connection_manager.close_connection(task_id)
+                raise HTTPException(status_code=500, detail=f"Failed to create video track: {e}")
+        else:
+            logger.info("Audio only mode requested. Skipping video track creation.")
         
         # Аудио трек для воспроизведения ответов
-        from aiortc.contrib.media import MediaPlayer
-        # Пустой media player изначально, он будет заменен при генерации
-        # В оригинале использовался костыль с DelayedMediaPlayerTrack
-        audio_track = stream_service.create_audio_track(None, video_track)
-        pc.addTrack(audio_track)
+        try:
+            from aiortc.contrib.media import MediaPlayer
+            # Пустой media player изначально, он будет заменен при генерации
+            # В оригинале использовался костыль с DelayedMediaPlayerTrack
+            logger.info("Creating audio track...")
+            audio_track = stream_service.create_audio_track(None, video_track)
+            logger.info(f"Audio track created: {audio_track}")
+            sender = pc.addTrack(audio_track)
+            logger.info(f"Audio track added to PC: {sender}")
+        except Exception as e:
+            logger.error(f"Failed to create/add audio track: {e}", exc_info=True)
+            raise e
         
         # --- Welcome Video Logic ---
-        welcome_text = os.getenv("VIDEO_HELLO_TEXT")
+        welcome_text = request.video_hello_text if request.video_hello_text else os.getenv("VIDEO_HELLO_TEXT")
         settings_id = os.getenv("TTS_SETTINGS_ID", "1765145591841-i6lqzzwui")
         
         # Check if this is a "welcome" scenario (no task_id provided or specific flag? User said "when connecting")
@@ -333,48 +361,81 @@ async def webrtc_offer(
                 # Check for cached VIDEO using the hash (and video ext from video_path)
                 video_ext = os.path.splitext(video_path)[1]
                 cached_video_name = f"cached_{welcome_hash}.mp4" # Force mp4 for output usually
-                cached_video_path = os.path.join("data/video", cached_video_name)
-                os.makedirs("data/video", exist_ok=True) # Ensure dir
+                cached_video_path = os.path.join("data/video/cached", cached_video_name)
+                os.makedirs("data/video/cached", exist_ok=True) # Ensure dir
                 
                 # Check Audio
                 welcome_audio_path = await ensure_welcome_audio(welcome_text, welcome_hash, config.audio_dir, settings_id)
                 
                 if welcome_audio_path:
-                    if os.path.exists(cached_video_path) and os.path.getsize(cached_video_path) > 0:
-                        logger.info(f"HIT: Playing cached welcome video: {cached_video_path}")
-                        
-                        # Play VIDEO from file
-                        # video_track is an instance of VideoStreamGenerator which now has play_video_file
-                        asyncio.create_task(video_track.play_video_file(cached_video_path, fps=fps))
-                        
-                        # Play AUDIO
-                        # reset_audio_track with new path plays it
-                        stream_service.reset_audio_track(audio_track, new_audio_path=welcome_audio_path)
-                        
-                        did_schedule_welcome = True
-                        
+                    if video_track:
+                        if os.path.exists(cached_video_path) and os.path.getsize(cached_video_path) > 0:
+                            logger.info(f"HIT: Playing cached welcome video: {cached_video_path}")
+                            
+                            # Play VIDEO from file
+                            # video_track is an instance of VideoStreamGenerator which now has play_video_file
+                            async def delayed_play(path, fps, delay):
+                                 if delay > 0:
+                                     logger.info(f"Waiting for greeting delay: {delay}s")
+                                     await asyncio.sleep(delay)
+                                 
+                                 # Clear queue to remove idle frames that accumulated during delay
+                                 # This ensures the video starts immediately with the audio
+                                 if video_track:
+                                     q_size = video_track.frame_queue.qsize()
+                                     if q_size > 0:
+                                         logger.info(f"Clearing {q_size} idle frames from queue before playing welcome video")
+                                         while not video_track.frame_queue.empty():
+                                             try:
+                                                 video_track.frame_queue.get_nowait()
+                                             except:
+                                                 break
+                                                 
+                                 await video_track.play_video_file(path, fps=fps)
+
+                            asyncio.create_task(delayed_play(cached_video_path, fps, config.greeting_delay))
+                            
+                            # Play AUDIO
+                            # reset_audio_track with new path plays it
+                            stream_service.reset_audio_track(audio_track, new_audio_path=welcome_audio_path)
+                            
+                            did_schedule_welcome = True
+                            
+                        else:
+                            logger.info(f"MISS: Generating welcome video to cache: {cached_video_path}")
+                            
+                            # Start Generation with CAPTURE
+                            # using task_id (we need a unique task id for generation process)
+                            # But we also want to cache it.
+                            
+                            # Play AUDIO
+                            stream_service.reset_audio_track(audio_track, new_audio_path=welcome_audio_path)
+                            
+                            await inference_service.start_generation(
+                                task_id=task_id,
+                                video_track=video_track,
+                                audio_track=audio_track,
+                                video_path=video_path,
+                                audio_path=welcome_audio_path, # TTS audio
+                                fps=fps,
+                                batch_size=batch_size,
+                                version=config.musetalk_version,
+                                has_active_generation=False,
+                                capture_video_path=cached_video_path, # Capture for next time
+                                initial_delay=config.greeting_delay
+                            )
+                            did_schedule_welcome = True
                     else:
-                        logger.info(f"MISS: Generating welcome video to cache: {cached_video_path}")
+                        # Audio Only Logic
+                        logger.info("Audio only mode: Playing welcome audio.")
                         
-                        # Start Generation with CAPTURE
-                        # using task_id (we need a unique task id for generation process)
-                        # But we also want to cache it.
+                        async def delayed_audio(path, delay):
+                             if delay > 0:
+                                 logger.info(f"Waiting for greeting delay: {delay}s")
+                                 await asyncio.sleep(delay)
+                             stream_service.reset_audio_track(audio_track, new_audio_path=path)
                         
-                        # Play AUDIO
-                        stream_service.reset_audio_track(audio_track, new_audio_path=welcome_audio_path)
-                        
-                        await inference_service.start_generation(
-                            task_id=task_id,
-                            video_track=video_track,
-                            audio_track=audio_track,
-                            video_path=video_path,
-                            audio_path=welcome_audio_path, # TTS audio
-                            fps=fps,
-                            batch_size=batch_size,
-                            version=config.musetalk_version,
-                            has_active_generation=False,
-                            capture_video_path=cached_video_path # Capture for next time
-                        )
+                        asyncio.create_task(delayed_audio(welcome_audio_path, config.greeting_delay))
                         did_schedule_welcome = True
                 else:
                     logger.warning("Could not get welcome audio, skipping welcome video.")
@@ -406,10 +467,18 @@ async def webrtc_offer(
             if pc.connectionState in ["failed", "closed"]:
                 await cleanup_resources(task_id)
 
-        await pc.setRemoteDescription(offer_desc)
-        
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
+        try:
+            await pc.setRemoteDescription(offer_desc)
+            logger.info("Remote description set")
+            
+            answer = await pc.createAnswer()
+            logger.info("Answer created")
+            
+            await pc.setLocalDescription(answer)
+            logger.info("Local description set")
+        except Exception as e:
+            logger.error(f"Error during SDP negotiation: {e}", exc_info=True)
+            raise e
         
         # Ожидание сбора кандидатов (в aiortc это происходит автоматически после setLocalDescription,
         # но нужно дать немного времени или проверить состояние, если мы хотим отправить полный SDP)
@@ -504,19 +573,72 @@ async def restart_generation(
     audio_path = conn_info.get("audio_path", "data/audio/sun.wav")
     
     # Запуск новой генерации
-    await inference_service.start_generation(
-        task_id=task_id,
-        video_track=video_track,
-        audio_track=audio_track,
-        video_path=video_path,
-        audio_path=audio_path,
-        fps=fps,
-        batch_size=batch_size,
-        version=config.musetalk_version,
-        has_active_generation=False # Это новый запуск после стопа
-    )
+    # Запуск новой генерации
+    if video_track:
+        await inference_service.start_generation(
+            task_id=task_id,
+            video_track=video_track,
+            audio_track=audio_track,
+            video_path=video_path,
+            audio_path=audio_path,
+            fps=fps,
+            batch_size=batch_size,
+            version=config.musetalk_version,
+            has_active_generation=False # Это новый запуск после стопа
+        )
+    else:
+        logger.info(f"Audio only restart for task_id={task_id}, skipping video generation.")
     
     return {"status": "ok", "message": "Generation restarted", "task_id": task_id}
+
+@app.post("/api/webrtc/stop")
+async def stop_generation_endpoint(
+    task_id: str = Form(...),
+):
+    """
+    Останавливает текущую генерацию, очищает очереди и сбрасывает состояние,
+    сохраняя WebRTC соединение активным.
+    """
+    logger.info(f"Запрос на остановку генерации для task_id={task_id}")
+    
+    # Получаем информацию о соединении
+    conn_info = connection_manager.get_connection_info(task_id)
+    if not conn_info:
+        raise HTTPException(status_code=404, detail="Task not found or connection closed")
+    
+    # Останавливаем генерацию в сервисе (отправляет STOP в Redis)
+    await inference_service.stop_generation(task_id)
+    
+    # Очищаем очередь генерации в Redis (опционально, если нужно убрать ожидающие задачи)
+    # Сейчас inference_service.stop_generation отправляет STOP команду в конец очереди.
+    # Если мы хотим очистить очередь задач для этого task_id, это сложнее сделать атомарно в Redis без Lua скрипта,
+    # но отправка STOP обычно достаточна, чтобы демон пропустил или прервал текущую.
+    
+    # Очищаем локальные очереди треков
+    video_track = conn_info.get("video_track")
+    if video_track:
+        # Очистка очереди кадров
+        while not video_track.frame_queue.empty():
+            try:
+                video_track.frame_queue.get_nowait()
+            except:
+                break
+        
+        # Сброс флагов синхронизации для возврата в idle
+        video_track.running = True # Должен быть True чтобы крутился idle
+        with video_track.first_real_frame_lock:
+            video_track.first_real_frame_sent = False
+        with video_track.generation_completed_lock:
+            video_track.generation_completed = False
+        with video_track.content_frames_lock:
+            video_track.content_frames_sent = 0
+
+    # Сбрасываем аудио (останавливаем воспроизведение)
+    audio_track = conn_info.get("audio_track")
+    if audio_track:
+        stream_service.reset_audio_track(audio_track)
+        
+    return {"status": "ok", "message": "Generation stopped", "task_id": task_id}
 
 @app.post("/api/webrtc/upload_audio_and_generate")
 async def upload_audio_and_generate(
@@ -549,7 +671,9 @@ async def upload_audio_and_generate(
     timestamp = int(time.time() * 1000000) # Microseconds
     file_extension = os.path.splitext(audio_file.filename)[1] if audio_file.filename else ".wav"
     audio_filename = f"{task_id}_{timestamp}{file_extension}"
-    new_audio_path = os.path.join(config.audio_dir, audio_filename)
+    generated_dir = os.path.join(config.audio_dir, "generated")
+    os.makedirs(generated_dir, exist_ok=True)
+    new_audio_path = os.path.join(generated_dir, audio_filename)
     
     try:
         content = await audio_file.read()
@@ -599,25 +723,124 @@ async def upload_audio_and_generate(
     batch_size = conn_info.get("batch_size", 4)
     
     # Запуск генерации
+    # Запуск генерации
+    if video_track:
+        await inference_service.start_generation(
+            task_id=task_id,
+            video_track=video_track,
+            audio_track=audio_track,
+            video_path=video_path,
+            audio_path=new_audio_path,
+            fps=fps,
+            batch_size=batch_size,
+            version=config.musetalk_version,
+            has_active_generation=has_active
+        )
+    else:
+        logger.info(f"Audio only generation request for task_id={task_id}, skipping video generation.")
+    
+
+
+@app.get("/api/files/avatars")
+async def list_avatars():
+    """Список доступных видео-аватаров"""
+    files = []
+    video_dir = "data/video"
+    results_avatars_dir = "results/v15/avatars"
+    
+    valid_avatars = set()
+    if os.path.exists(results_avatars_dir):
+        valid_avatars = set(os.listdir(results_avatars_dir))
+
+    if os.path.exists(video_dir):
+        for f in os.listdir(video_dir):
+            if f.lower().endswith(('.mp4', '.avi', '.mov')):
+                # Check if corresponding folder exists in results/v15/avatars
+                name_without_ext = os.path.splitext(f)[0]
+                if name_without_ext in valid_avatars:
+                    files.append(f)
+    return {"files": sorted(files)}
+
+@app.get("/api/files/audio")
+async def list_audio():
+    """Список доступных аудио файлов"""
+    files = []
+    audio_dir = "data/audio"
+    if os.path.exists(audio_dir):
+        for f in os.listdir(audio_dir):
+            if f.lower().endswith(('.wav', '.mp3', '.m4a')):
+                files.append(f)
+    return {"files": sorted(files)}
+
+class GenerationRequest(BaseModel):
+    video_path: str
+    audio_path: str
+    bbox_shift: int = 0
+    extra_margin: int = 10
+    parsing_mode: str = "jaw"
+    left_cheek_width: int = 90
+    right_cheek_width: int = 90
+    fps: int = 25
+    batch_size: int = 8
+
+@app.post("/api/generate_offline")
+async def generate_offline(req: GenerationRequest):
+    """Запуск оффлайн генерации с параметрами"""
+    task_id = f"gen_{int(time.time()*1000)}"
+    
+    # Запуск генерации через сервис
+    # Используем start_generation но с доп параметрами
+    # inference_service нужно обновить чтобы принимать **kwargs или specific params
     await inference_service.start_generation(
         task_id=task_id,
-        video_track=video_track,
-        audio_track=audio_track,
-        video_path=video_path,
-        audio_path=new_audio_path,
-        fps=fps,
-        batch_size=batch_size,
+        video_track=None, # Нет треков для оффлайн
+        audio_track=None,
+        video_path=os.path.join("data/video", req.video_path),
+        audio_path=os.path.join("data/audio", req.audio_path),
+        fps=req.fps,
+        batch_size=req.batch_size,
         version=config.musetalk_version,
-        has_active_generation=has_active
+        # Передаем доп параметры через kwargs если изменим сервис, или пока просто как props
+        # FIXME: Update InferenceService signature
+        additional_params={
+            "bbox_shift": req.bbox_shift,
+            "extra_margin": req.extra_margin,
+            "parsing_mode": req.parsing_mode,
+            "left_cheek_width": req.left_cheek_width,
+            "right_cheek_width": req.right_cheek_width,
+            "use_preprocessed": False # Force raw mode for testing parameters
+        }
     )
     
-    return {
-        "status": "ok",
-        "message": f"Аудио файл загружен и генерация для task_id={task_id} запущена",
-        "task_id": task_id,
-        "audio_path": new_audio_path,
-        "audio_size": len(content)
-    }
+    return {"task_id": task_id, "status": "started"}
+
+app.mount("/results", StaticFiles(directory="results"), name="results")
+
+@app.get("/api/result/{task_id}")
+async def get_result_status(task_id: str):
+    """Проверка статуса генерации"""
+    # Check multiple possible locations
+    possible_paths = [
+        f"results/v1.5/{task_id}.mp4",
+        f"results/v15/{task_id}.mp4",
+        f"results/realtime/v15/{task_id}.mp4",
+        f"results/realtime/v1.5/{task_id}.mp4"
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            # URL is relative to the mounted /results endpoint
+            # path is like results/subdir/file.mp4 -> url /results/subdir/file.mp4
+            # We assume app.mount("/results", ...) is serving the "results" folder
+            relative_path = os.path.relpath(path, "results").replace("\\", "/")
+            return {"status": "completed", "url": f"/results/{relative_path}"}
+    
+    # Check if active
+    is_active = await inference_service.is_generation_active(task_id)
+    if is_active:
+        return {"status": "processing"}
+        
+    return {"status": "not_found_or_failed"}
 
 async def cleanup_resources(task_id):
     """Очистка ресурсов"""

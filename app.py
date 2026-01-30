@@ -478,25 +478,7 @@ css = """#input_img {max-width: 1024px !important} #output_vid {max-width: 1024p
 
 with gr.Blocks(css=css) as demo:
     gr.Markdown(
-        """<div align='center'> <h1>MuseTalk: Real-Time High-Fidelity Video Dubbing via Spatio-Temporal Sampling</h1> \
-                    <h2 style='font-weight: 450; font-size: 1rem; margin: 0rem'>\
-                    </br>\
-                    Yue Zhang <sup>*</sup>,\
-                    Zhizhou Zhong <sup>*</sup>,\
-                    Minhao Liu<sup>*</sup>,\
-                    Zhaokang Chen,\
-                    Bin Wu<sup>†</sup>,\
-                    Yubin Zeng,\
-                    Chao Zhang,\
-                    Yingjie He,\
-                    Junxin Huang,\
-                    Wenjiang Zhou <br>\
-                    (<sup>*</sup>Equal Contribution, <sup>†</sup>Corresponding Author, benbinwu@tencent.com)\
-                    Lyra Lab, Tencent Music Entertainment\
-                </h2> \
-                <a style='font-size:18px;color: #000000' href='https://github.com/TMElyralab/MuseTalk'>[Github Repo]</a>\
-                <a style='font-size:18px;color: #000000' href='https://github.com/TMElyralab/MuseTalk'>[Huggingface]</a>\
-                <a style='font-size:18px;color: #000000' href='https://arxiv.org/abs/2410.10122'> [Technical report] </a>"""
+        """"""
     )
 
     with gr.Row():

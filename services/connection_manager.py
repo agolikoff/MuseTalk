@@ -47,6 +47,7 @@ class ConnectionManager:
         ice_servers.append(RTCIceServer(urls=["stun:stun.l.google.com:19302"]))
         ice_servers.append(RTCIceServer(urls=["stun:stun1.l.google.com:19302"]))
         ice_servers.append(RTCIceServer(urls=["stun:stun2.l.google.com:19302"]))
+        ice_servers.append(RTCIceServer(urls=["stun:stun.relay.metered.ca:80"]))
         logger.info("Добавлены публичные STUN серверы Google")
 
         # 2. Добавляем Custom TURN сервер
@@ -68,30 +69,36 @@ class ConnectionManager:
         
         # 3. Добавляем публичные TURN серверы (Metered.ca) ТОЛЬКО если просили и нет своего
         # В оригинале логика: if use_public_turn and turn_servers_added == 0
-        if self.config.use_public_turn and turn_servers_added == 0:
+        if self.config.use_public_turn or turn_servers_added == 0:
             logger.info(f"Используются публичные TURN серверы (Metered.ca)")
-            ice_servers.append(
-                RTCIceServer(
-                    urls=[
-                        "turn:openrelay.metered.ca:80",
-                        "turn:openrelay.metered.ca:443",
-                        "turn:openrelay.metered.ca:443?transport=tcp"
-                    ],
-                    username="openrelayproject",
-                    credential="openrelayproject"
-                )
-            )
-            ice_servers.append(
-                RTCIceServer(
-                    urls=[
-                        "turn:relay.metered.ca:80",
-                        "turn:relay.metered.ca:443",
-                        "turn:relay.metered.ca:443?transport=tcp"
-                    ],
-                    username="openrelayproject",
-                    credential="openrelayproject"
-                )
-            )
+            # Добавляем ExpressTurn
+            ice_servers.append(RTCIceServer(
+                urls=["turn:free.expressturn.com:3478"],
+                username="000000002083522617",
+                credential="6tDY9S5LOEjq4QzVg0I4vdZv8hM="
+            ))
+            ice_servers.append(RTCIceServer(
+                urls=["turn:standard.relay.metered.ca:80"],
+                username="75a832015154748652ddb17e",
+                credential="6Igq/7ph1nThXk4t"
+            ))
+            ice_servers.append(RTCIceServer(
+                urls=["turn:standard.relay.metered.ca:80?transport=tcp"],
+                username="75a832015154748652ddb17e",
+                credential="6Igq/7ph1nThXk4t"
+            ))
+            ice_servers.append(RTCIceServer(
+                urls=["turn:standard.relay.metered.ca:443"],
+                username="75a832015154748652ddb17e",
+                credential="6Igq/7ph1nThXk4t"
+            ))
+            ice_servers.append(RTCIceServer(
+                urls=["turns:standard.relay.metered.ca:443?transport=tcp"],
+                username="75a832015154748652ddb17e",
+                credential="6Igq/7ph1nThXk4t"
+            ))
+            
+            
             
         rtc_config = RTCConfiguration(iceServers=ice_servers)
         pc = RTCPeerConnection(configuration=rtc_config)

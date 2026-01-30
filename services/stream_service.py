@@ -103,20 +103,17 @@ class DelayedMediaPlayerTrack(AudioStreamTrack):
         self._recv_call_count += 1
         
         if not self.audio_started:
-            if self.video_track:
-                with self.video_track.first_real_frame_lock:
-                    first_real_sent = self.video_track.first_real_frame_sent
-                
-                if first_real_sent:
-                    self.audio_started = True
-                    self.silence_frames_sent = 0  
-                    logger.info(f"[DelayedMediaPlayerTrack] ✓ Аудио синхронизировано с видео (первый реальный кадр отправлен, silence_frames_reset=0)")
-                else:
-                    await asyncio.sleep(0.01)
-                    return self._create_silence_frame(480)
-            else:
+            # Ждем пока видео не начнет отправлять реальные кадры
+            while self.video_track and self.video_track.running and not self.video_track.first_real_frame_sent:
                 await asyncio.sleep(0.01)
+            
+            # Если трек остановился пока ждали
+            if self.video_track and not self.video_track.running:
                 return self._create_silence_frame(480)
+
+            self.audio_started = True
+            self.silence_frames_sent = 0  
+            logger.info(f"[DelayedMediaPlayerTrack] ✓ Аудио синхронизировано с видео (первый реальный кадр отправлен)")
         
         if self.media_player_ended:
             return self._create_silence_frame(480)

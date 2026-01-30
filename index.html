@@ -450,6 +450,7 @@
 </head>
 
 <body>
+    <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <div class="real-time-container">
         <!-- Header -->
@@ -499,9 +500,10 @@
 
         // WebRTC settings (from test file)
         const WEBRTC_API_URL = 'https://avatar.stacqan.com/api-rtc';
+        const CHAT_API_BASE_URL = 'https://avatar.stacqan.com/api-chat/api/v1';
         const TASK_ID = 'couch_ashley';
         const VIDEO_PATH = 'data/video/couch_ashley.mp4';
-        const VIDEO_HELLO_TEXT = 'Hello! How can I support you today?';
+        const VIDEO_HELLO_TEXT = 'Hi, I’m Ashley, how can I help you today?';
         const AUDIO_PATH = 'data/audio/test.wav';
         const VERSION = 'v15';
         const FPS = 12;
@@ -509,8 +511,11 @@
         const TURN_SERVER_URL = '';
         const TURN_USERNAME = 'webrtc';
         const TURN_CREDENTIAL = 'my_password';
-        const DIALOG_ID = 'ea8f6df4-76b8-41f8-a9f9-4ee4d27ebbe3';
+        // const DIALOG_ID = 'ea8f6df4-76b8-41f8-a9f9-4ee4d27ebbe3'; // Removed in favor of dynamic dialog creation
         const SETTINGS_ID = '1765145591841-i6lqzzwui';
+        const COACH_ID = '5dffbc83-e22b-4b48-8127-a7935bdaa275';
+        const USER_ID = 'test';
+        let currentDialogId = null;
 
 
         const videoPlayer = document.getElementById('character-avatar-video');
@@ -583,7 +588,9 @@
                 const iceServers = [
                     { urls: 'stun:stun.l.google.com:19302' },
                     { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:stun2.l.google.com:19302' }
+                    { urls: 'stun:stun2.l.google.com:19302' },
+                    { urls: 'stun:stun.relay.metered.ca:80' }
+
                 ];
 
                 // Add TURN server if specified
@@ -602,21 +609,20 @@
                     iceServers.push(
                         {
                             urls: [
-                                'turn:openrelay.metered.ca:80',
-                                'turn:openrelay.metered.ca:443',
-                                'turn:openrelay.metered.ca:443?transport=tcp'
+                                'turn:free.expressturn.com:3478'
                             ],
-                            username: 'openrelayproject',
-                            credential: 'openrelayproject'
+                            username: '000000002083522617',
+                            credential: '6tDY9S5LOEjq4QzVg0I4vdZv8hM='
                         },
                         {
                             urls: [
-                                'turn:relay.metered.ca:80',
-                                'turn:relay.metered.ca:443',
-                                'turn:relay.metered.ca:443?transport=tcp'
+                                'turn:standard.relay.metered.ca:80',
+                                'turn:standard.relay.metered.ca:80?transport=tcp',
+                                'turn:standard.relay.metered.ca:443',
+                                'turn:standard.relay.metered.ca:443?transport=tcp'
                             ],
-                            username: 'openrelayproject',
-                            credential: 'openrelayproject'
+                            username: '75a832015154748652ddb17e',
+                            credential: '6Igq/7ph1nThXk4t'
                         }
                     );
                 }
@@ -829,7 +835,8 @@
                         audio_path: AUDIO_PATH,
                         version: VERSION,
                         fps: FPS,
-                        batch_size: BATCH_SIZE
+                        batch_size: BATCH_SIZE,
+                        video_hello_text: VIDEO_HELLO_TEXT
                     })
                 });
 
@@ -921,6 +928,39 @@
         // Initialize on page load - REMOVED automatic init, now handling via button
         // initWebRTCStreaming();
 
+        async function createDialog() {
+            try {
+                console.log('Creating new dialog...');
+                showStatus('Creating dialog...', 'loading');
+                const response = await fetch(`${CHAT_API_BASE_URL}/dialogs`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${AUTH_TOKEN}`,
+                    },
+                    body: JSON.stringify({
+                        coach_id: COACH_ID,
+                        user_id: USER_ID,
+                        metadata: {
+                            source: "video"
+                        }
+                    }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Failed to create dialog: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                console.log('Dialog created:', data);
+                return data.id;
+            } catch (error) {
+                console.error('Error creating dialog:', error);
+                showStatus('Error creating dialog: ' + error.message, 'error');
+                throw error;
+            }
+        }
+
         // WebSocket connection for speech recognition
         function connectWebSocket() {
             // Check that WebRTC connection is established
@@ -938,94 +978,107 @@
                 return socketConnectionPromise;
             }
 
-            socketConnectionPromise = new Promise((resolve, reject) => {
-                try {
-                    // Collect query parameters
-                    const query = {
-                        task_id: TASK_ID,
-                        dialog_id: DIALOG_ID,
-                        settings_id: SETTINGS_ID
-                    };
-
-                    socket = io(WEBSOCKET_SERVER_URL, {
-                        path: WEBSOCKET_PATH,
-                        auth: {
-                            token: AUTH_TOKEN
-                        },
-                        query: query,
-                        transports: ['websocket', 'polling']
-                    });
-
-                    socket.on('connect', () => {
-                        console.log('WebSocket connected');
-                        showStatus('WebSocket connected', 'success');
-                        resolve();
-                    });
-
-                    socket.on('disconnect', () => {
-                        console.log('WebSocket disconnected');
-                        showStatus('WebSocket disconnected', 'error');
-                        socketConnectionPromise = null; // Reset promise on disconnect
-                        if (isRecording) {
-                            stopRecording();
-                        }
-                    });
-
-                    socket.on('connect_error', (error) => {
-                        console.error('WebSocket connection error:', error);
-                        showStatus('WebSocket connection error: ' + error.message, 'error');
-                        socketConnectionPromise = null; // Reset promise on error
-                        reject(error);
-                    });
-
-                    socket.on('recognition-started', (data) => {
-                        console.log('Recognition started:', data);
-                        recognitionActive = true;
-                        // recordButton.classList.add('speech-active'); // Removed: Only show on results
-                        showStatus('Recognition started', 'success');
-                    });
-
-                    socket.on('recognition-result', (data) => {
-                        console.log('Recognition result:', data);
-
-                        // Show active border when receiving results
-                        recordButton.classList.add('speech-active');
-
-                        // Clear existing timeout
-                        if (recognitionBorderTimeout) {
-                            clearTimeout(recognitionBorderTimeout);
-                        }
-
-                        // Hide border after 1 second of no results
-                        recognitionBorderTimeout = setTimeout(() => {
-                            // double check we are still recording before removing, although removing harmlessly
-                            recordButton.classList.remove('speech-active');
-                        }, 1000);
-                    });
-
-                    socket.on('recognition-error', (data) => {
-                        console.error('Recognition error:', data);
-                        showStatus('Recognition error: ' + data.message, 'error');
-                        recordButton.classList.remove('speech-active'); // Disable green border
-                        if (isRecording) {
-                            stopRecording();
-                        }
-                    });
-
-                    socket.on('recognition-stopped', (data) => {
-                        console.log('Recognition stopped:', data);
-                        recognitionActive = false;
-                        recordButton.classList.remove('speech-active'); // Disable green border
-                        showStatus('Recognition stopped', 'success');
-                    });
-
-                } catch (error) {
-                    console.error('Error connecting WebSocket:', error);
-                    showStatus('Connection error: ' + error.message, 'error');
-                    socketConnectionPromise = null;
-                    reject(error);
+            socketConnectionPromise = (async () => {
+                // Create dialog if needed
+                if (!currentDialogId) {
+                    try {
+                        currentDialogId = await createDialog();
+                    } catch (error) {
+                        console.error('Cannot connect WebSocket without dialog ID');
+                        socketConnectionPromise = null;
+                        throw error;
+                    }
                 }
-            });
+
+                return new Promise((resolve, reject) => {
+                    try {
+                        // Collect query parameters
+                        const query = {
+                            task_id: TASK_ID,
+                            dialog_id: currentDialogId,
+                            settings_id: SETTINGS_ID
+                        };
+
+                        socket = io(WEBSOCKET_SERVER_URL, {
+                            path: WEBSOCKET_PATH,
+                            auth: {
+                                token: AUTH_TOKEN
+                            },
+                            query: query,
+                            transports: ['websocket', 'polling']
+                        });
+
+                        socket.on('connect', () => {
+                            console.log('WebSocket connected');
+                            showStatus('WebSocket connected', 'success');
+                            resolve();
+                        });
+
+                        socket.on('disconnect', () => {
+                            console.log('WebSocket disconnected');
+                            showStatus('WebSocket disconnected', 'error');
+                            socketConnectionPromise = null; // Reset promise on disconnect
+                            if (isRecording) {
+                                stopRecording();
+                            }
+                        });
+
+                        socket.on('connect_error', (error) => {
+                            console.error('WebSocket connection error:', error);
+                            showStatus('WebSocket connection error: ' + error.message, 'error');
+                            socketConnectionPromise = null; // Reset promise on error
+                            reject(error);
+                        });
+
+                        socket.on('recognition-started', (data) => {
+                            console.log('Recognition started:', data);
+                            recognitionActive = true;
+                            // recordButton.classList.add('speech-active'); // Removed: Only show on results
+                            showStatus('Recognition started', 'success');
+                        });
+
+                        socket.on('recognition-result', (data) => {
+                            console.log('Recognition result:', data);
+
+                            // Show active border when receiving results
+                            recordButton.classList.add('speech-active');
+
+                            // Clear existing timeout
+                            if (recognitionBorderTimeout) {
+                                clearTimeout(recognitionBorderTimeout);
+                            }
+
+                            // Hide border after 1 second of no results
+                            recognitionBorderTimeout = setTimeout(() => {
+                                // double check we are still recording before removing, although removing harmlessly
+                                recordButton.classList.remove('speech-active');
+                            }, 1000);
+                        });
+
+                        socket.on('recognition-error', (data) => {
+                            console.error('Recognition error:', data);
+                            showStatus('Recognition error: ' + data.message, 'error');
+                            recordButton.classList.remove('speech-active'); // Disable green border
+                            if (isRecording) {
+                                stopRecording();
+                            }
+                        });
+
+                        socket.on('recognition-stopped', (data) => {
+                            console.log('Recognition stopped:', data);
+                            recognitionActive = false;
+                            recordButton.classList.remove('speech-active'); // Disable green border
+                            showStatus('Recognition stopped', 'success');
+                        });
+
+                    } catch (error) {
+                        console.error('Error connecting WebSocket:', error);
+                        showStatus('Connection error: ' + error.message, 'error');
+                        socketConnectionPromise = null;
+                        reject(error);
+                    }
+                });
+            })();
 
             return socketConnectionPromise;
         }
