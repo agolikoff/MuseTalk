@@ -125,6 +125,7 @@ class WebRTCOfferRequest(BaseModel):
     task_id: Optional[str] = None
     version: Optional[str] = None
     video_hello_text: Optional[str] = None
+    settings_id: Optional[str] = None
     audio_only: bool = False
 
 # Инициализация сервисов
@@ -346,7 +347,8 @@ async def webrtc_offer(
         
         # --- Welcome Video Logic ---
         welcome_text = request.video_hello_text if request.video_hello_text else os.getenv("VIDEO_HELLO_TEXT")
-        settings_id = os.getenv("TTS_SETTINGS_ID", "1765145591841-i6lqzzwui")
+        # Use settings_id from request if available, otherwise fallback to env
+        settings_id = request.settings_id if request.settings_id else os.getenv("TTS_SETTINGS_ID", "1765145591841-i6lqzzwui")
         
         # Check if this is a "welcome" scenario (no task_id provided or specific flag? User said "when connecting")
         # Assuming every new connection is a candidate for welcome video if env is set.
