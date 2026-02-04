@@ -34,6 +34,37 @@ class AudioProcessor:
 
         return features, len(librosa_output)
 
+    def get_audio_feature_from_data(self, audio_data, sampling_rate=16000, weight_dtype=None):
+        """
+        Process audio from numpy array (float32).
+        """
+        if sampling_rate != 16000:
+             # Simple resampling if needed, but for now we expect 16k from AudioStreamTrack
+             # or we can use librosa.resample if available, but let's avoid extra deps if possible
+             # assuming input is already 16k
+             pass
+        
+        # Split audio into 30s segments
+        segment_length = 30 * sampling_rate
+        
+        # Handle case where audio is shorter than segment (pad or just process?)
+        # Feature extractor handles padding usually.
+        
+        segments = [audio_data[i:i + segment_length] for i in range(0, len(audio_data), segment_length)]
+
+        features = []
+        for segment in segments:
+            audio_feature = self.feature_extractor(
+                segment,
+                return_tensors="pt",
+                sampling_rate=sampling_rate
+            ).input_features
+            if weight_dtype is not None:
+                audio_feature = audio_feature.to(dtype=weight_dtype)
+            features.append(audio_feature)
+
+        return features, len(audio_data)
+
     def get_whisper_chunk(
         self,
         whisper_input_features,
