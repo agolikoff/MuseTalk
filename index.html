@@ -752,10 +752,16 @@
                     }
                 };
 
+                // Combine all tracks into a single MediaStream for native A/V sync
+                const combinedStream = new MediaStream();
                 pc.ontrack = (event) => {
                     console.log(`Media stream received: ${event.track.kind}`);
+                    combinedStream.addTrack(event.track);
+
                     if (event.track.kind === 'video') {
-                        videoPlayer.srcObject = event.streams[0];
+                        // Assign the combined stream (with both video+audio) to the video element
+                        // The browser will handle A/V synchronization internally
+                        videoPlayer.srcObject = combinedStream;
                         // Hide static image and show video
                         if (staticImage) {
                             //staticImage.style.display = 'none';
@@ -802,6 +808,13 @@
                             }
                             videoPlayer.style.display = 'none';
                         };
+                    } else if (event.track.kind === 'audio') {
+                        console.log('Audio track added to combined stream for A/V sync');
+                        // Re-assign combined stream if video was already set
+                        // (in case audio arrives after video)
+                        if (videoPlayer.srcObject !== combinedStream) {
+                            videoPlayer.srcObject = combinedStream;
+                        }
                     }
                 };
 

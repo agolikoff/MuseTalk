@@ -112,32 +112,18 @@ class DelayedMediaPlayerTrack(AudioStreamTrack):
                 return self._create_silence_frame(480)
 
             self.audio_started = True
-            self.silence_frames_sent = 0  
-            logger.info(f"[DelayedMediaPlayerTrack] ✓ Аудио синхронизировано с видео (первый реальный кадр отправлен)")
-        
-        if self.media_player_ended:
-            return self._create_silence_frame(480)
-            
-        # --- AV SYNC CHECK ---
-        if self.video_track and hasattr(self.video_track, 'content_frames_sent'):
-            # Считаем текущее время аудио (сколько воспроизвели)
-            audio_time = self.audio_samples_read / self.sample_rate
-            
-            # Считаем текущее время видео (сколько контентных кадров показали)
-            # Используем lock для атомарности, хотя чтение int в python атомарно, но для порядка
-            with self.video_track.content_frames_lock:
-                video_frames = self.video_track.content_frames_sent
-            
-            video_fps = self.video_track.fps
-            video_time = video_frames / video_fps
-            
-            # Если аудио убежало вперед видео больше чем на порог
-            if audio_time > video_time + self.sync_threshold_seconds:
-                # logger.debug(f"[AV-SYNC] Audio paused: A={audio_time:.3f}s > V={video_time:.3f}s (+{self.sync_threshold_seconds}s)")
-                # Возвращаем тишину, НЕ читая из плеера (ставим на паузу)
-                # Важно: не увеличиваем audio_samples_read, так как это тишина "вставки"
-                return self._create_silence_frame(480)
-        # ---------------------
+            self.silence_frames_sent = 0
+
+            # Sync Audio PTS with Video PTS (jump to match, no offsets)
+            if self.video_track:
+                current_video_pts = int(self.video_track.frame_count * 90000 / self.video_track.fps)
+                new_audio_pts = int(current_video_pts * 48000 / 90000)
+                
+                if new_audio_pts > self.next_pts:
+                    logger.info(f"[DelayedMediaPlayerTrack] 🔄 Syncing PTS: Jump from {self.next_pts} to {new_audio_pts}")
+                    self.next_pts = new_audio_pts
+
+            logger.info(f"[DelayedMediaPlayerTrack] ✓ Аудио запущено")
         
         if self.media_player and self.media_player.audio:
             try:
