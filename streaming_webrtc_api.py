@@ -128,6 +128,12 @@ class WebRTCOfferRequest(BaseModel):
     settings_id: Optional[str] = None
     audio_only: bool = False
 
+class StopGenerationRequest(BaseModel):
+    task_id: str
+
+class RestartGenerationRequest(BaseModel):
+    task_id: str
+
 # Инициализация сервисов
 stream_service = StreamService()
 connection_manager = ConnectionManager(config)
@@ -522,11 +528,12 @@ async def webrtc_offer(
 
 @app.post("/api/webrtc/restart_generation")
 async def restart_generation(
-    task_id: str = Form(...),
+    request: RestartGenerationRequest
 ):
     """
     Перезапускает генерацию видео для существующей сессии.
     """
+    task_id = request.task_id
     logger.info(f"Запрос на перезапуск генерации для task_id={task_id}")
     
     # Получаем информацию о соединении
@@ -595,12 +602,13 @@ async def restart_generation(
 
 @app.post("/api/webrtc/stop")
 async def stop_generation_endpoint(
-    task_id: str = Form(...),
+    request: StopGenerationRequest
 ):
     """
     Останавливает текущую генерацию, очищает очереди и сбрасывает состояние,
     сохраняя WebRTC соединение активным.
     """
+    task_id = request.task_id
     logger.info(f"Запрос на остановку генерации для task_id={task_id}")
     
     # Получаем информацию о соединении

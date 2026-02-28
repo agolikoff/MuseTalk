@@ -612,6 +612,98 @@ class ModelDaemonService:
         total_time = time.perf_counter() - start_time
         print(f"[Daemon] Все модели успешно загружены! Общее время загрузки: {format_time(total_time)}", flush=True)
     
+    def _preload_avatars(self):
+        """Предзагружает все готовые аватары из results/{version}/avatars в память."""
+        if self.version_arg == "v15":
+            avatars_dir = os.path.join(self.result_dir, self.version_arg, "avatars")
+        else:
+            avatars_dir = os.path.join(self.result_dir, "avatars")
+        
+        if not os.path.exists(avatars_dir):
+            print(f"[Daemon] Папка аватаров не найдена: {avatars_dir}", flush=True)
+            return
+        
+        # Собираем все подпапки — это готовые аватары (пропускаем хэшированные версии типа couch_1_a3f8b2d1)
+        import re
+        hash_suffix_pattern = re.compile(r'_[0-9a-f]{8}$')
+        avatar_dirs = [d for d in os.listdir(avatars_dir) 
+                       if os.path.isdir(os.path.join(avatars_dir, d)) 
+                       and not hash_suffix_pattern.search(d)]
+        
+        if not avatar_dirs:
+            print(f"[Daemon] Нет готовых аватаров в {avatars_dir}", flush=True)
+            return
+        
+        print(f"[Daemon] Предзагрузка {len(avatar_dirs)} аватаров из {avatars_dir}...", flush=True)
+        preload_start = time.perf_counter()
+        loaded_count = 0
+        
+        for avatar_name in avatar_dirs:
+            try:
+                avatar_start = time.perf_counter()
+                
+                # Ищем соответствующий видеофайл в data/video/
+                video_path = None
+                # Имя аватара может содержать хэш параметров (name_hash), берём базовое имя
+                base_name = avatar_name.split('_')[0] if '_' in avatar_name else avatar_name
+                # Но может быть и составное имя типа couch_1, поэтому пробуем точное совпадение сначала
+                for ext in ('.mp4', '.avi', '.mov'):
+                    candidate = os.path.join("data/video", f"{avatar_name}{ext}")
+                    if os.path.exists(candidate):
+                        video_path = candidate
+                        break
+                
+                # Если не нашли по полному имени, ищем по базовому (без хэша параметров)
+                if video_path is None and '_' in avatar_name:
+                    # Пробуем убрать последний сегмент (хэш), если он выглядит как хэш (8 символов hex)
+                    parts = avatar_name.rsplit('_', 1)
+                    if len(parts) == 2 and len(parts[1]) == 8:
+                        potential_base = parts[0]
+                    else:
+                        potential_base = avatar_name
+                    
+                    for ext in ('.mp4', '.avi', '.mov'):
+                        candidate = os.path.join("data/video", f"{potential_base}{ext}")
+                        if os.path.exists(candidate):
+                            video_path = candidate
+                            break
+                
+                if video_path is None:
+                    print(f"[Daemon] ⚠️ Видеофайл для аватара '{avatar_name}' не найден, пропускаем", flush=True)
+                    continue
+                
+                # Создаём AvatarDaemon с дефолтными параметрами
+                avatar = AvatarDaemon(
+                    task_id=avatar_name,
+                    video_path=video_path,
+                    result_dir=self.result_dir,
+                    version=self.version_arg,
+                    bbox_shift=0,
+                    left_cheek_width=self.left_cheek_width,
+                    right_cheek_width=self.right_cheek_width,
+                    parsing_mode="jaw",
+                    extra_margin=10,
+                    daemon_service=self
+                )
+                
+                # prepare() проверяет кэш на диске и вызывает _load_materials()
+                avatar.prepare()
+                
+                if avatar.materials is not None:
+                    self.avatar_cache[avatar_name] = avatar
+                    loaded_count += 1
+                    avatar_time = time.perf_counter() - avatar_start
+                    print(f"[Daemon] ✓ Аватар '{avatar_name}' загружен в память ({format_time(avatar_time)})", flush=True)
+                else:
+                    print(f"[Daemon] ⚠️ Не удалось загрузить материалы для '{avatar_name}'", flush=True)
+                    
+            except Exception as e:
+                print(f"[Daemon] ⚠️ Ошибка при загрузке аватара '{avatar_name}': {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+        
+        preload_time = time.perf_counter() - preload_start
+        print(f"[Daemon] Предзагрузка завершена: {loaded_count}/{len(avatar_dirs)} аватаров за {format_time(preload_time)}", flush=True)
 
     
     def _process_frames_pipeline(self, res_frame_queue, video_len, coord_list_cycle, 
@@ -2003,6 +2095,12 @@ class ModelDaemonService:
             self._load_models()
         else:
             print("[Daemon] Пропуск загрузки моделей (skip_model_loading=True)", flush=True)
+
+        # Предзагрузка всех готовых аватаров в память (опционально, управляется через .env)
+        if os.getenv("PRELOAD_AVATARS", "true").lower() == "true":
+            self._preload_avatars()
+        else:
+            print("[Daemon] Предзагрузка аватаров отключена (PRELOAD_AVATARS=false)", flush=True)
 
         print(f"[Daemon] Сервис запущен.", flush=True)
         if self.redis_client:
