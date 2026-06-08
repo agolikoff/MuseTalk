@@ -446,6 +446,40 @@
                 transform: rotate(360deg);
             }
         }
+
+        .connection-waiting {
+            position: absolute;
+            bottom: 30px;
+            right: 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            box-shadow: 0 10px 20px rgba(118, 75, 162, 0.3);
+            z-index: 9999;
+            border-radius: 30px;
+            padding: 0 20px;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            color: white;
+            font-weight: bold;
+        }
+
+        .connection-waiting .ah-spinner {
+            display: block;
+            width: 20px;
+            height: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .connection-waiting {
+                bottom: 20px;
+                right: 20px;
+                height: 50px;
+                padding: 0 15px;
+                font-size: 14px;
+            }
+        }
     </style>
 </head>
 
@@ -480,8 +514,14 @@
         <div id="status" class="status-indicator" style="display: none;"></div>
         <div id="timer" class="timer"></div>
 
+        <!-- Connection waiting indicator -->
+        <div id="connection-waiting" class="connection-waiting">
+            <div class="ah-spinner"></div>
+            <span>Waiting for connection...</span>
+        </div>
+
         <!-- Call button -->
-        <button class="ah-btn ah-btn-icon btn-character-call" id="btnRealtime">
+        <button class="ah-btn ah-btn-icon btn-character-call" id="btnRealtime" style="display: none;">
             <svg class="ah-icon" width="22" height="22" viewBox="0 0 24 24" fill="#fff"
                 xmlns="http://www.w3.org/2000/svg">
                 <path
@@ -492,128 +532,229 @@
     </div>
 
     <script>
-        // WebSocket settings for speech recognition
-        const WEBSOCKET_SERVER_URL = 'https://avatar.stacqan.com';
-        const WEBSOCKET_PATH = '/api-voice/socket.io';
-        const AUTH_TOKEN = 'sk_live_h8mvwCjYP3hIzpxziW4Ey00GWfWfOtQfju13_uGAzWA';
-        const LANGUAGE_CODE = 'en-US'; // 'en-US' or 'ru-RU'
+        // Configurations
+        const CONFIG = {
+            INSTANCE_NAME: 'avatar-gpu',
+            WATCHER_URL: 'https://avatar.stacqan.com/watcher',
+            WEBSOCKET: {
+                URL: 'https://avatar.stacqan.com',
+                PATH: '/api-voice/socket.io',
+                AUTH_TOKEN: 'sk_live_h8mvwCjYP3hIzpxziW4Ey00GWfWfOtQfju13_uGAzWA',
+                LANGUAGE_CODE: 'en-US'
+            },
+            WEBRTC: {
+                API_URL: 'https://avatar.stacqan.com/api-rtc',
+                CHAT_API_URL: 'https://avatar.stacqan.com/api-chat/api/v1',
+                TASK_ID: 'couch_ashley',
+                VIDEO_PATH: 'data/video/couch_ashley.mp4',
+                VIDEO_HELLO_TEXT: 'Hi, I’m Ashley, how can I help you today?',
+                AUDIO_PATH: 'data/audio/test.wav',
+                VERSION: 'v15',
+                FPS: 12,
+                BATCH_SIZE: 8,
+                TURN_SERVER_URL: '',
+                TURN_USERNAME: 'webrtc',
+                TURN_CREDENTIAL: 'my_password',
+                SETTINGS_ID: '1765145591841-i6lqzzwui',
+                COACH_ID: '5dffbc83-e22b-4b48-8127-a7935bdaa275',
+                USER_ID: 'test',
+                CONNECTING_TIMEOUT_MS: 5000,
+                MAX_RECONNECT_ATTEMPTS: 5
+            }
+        };
 
-        // WebRTC settings (from test file)
-        const WEBRTC_API_URL = 'https://avatar.stacqan.com/api-rtc';
-        const CHAT_API_BASE_URL = 'https://avatar.stacqan.com/api-chat/api/v1';
-        const TASK_ID = 'couch_ashley';
-        const VIDEO_PATH = 'data/video/couch_ashley.mp4';
-        const VIDEO_HELLO_TEXT = 'Hi, I’m Ashley, how can I help you today?';
-        const AUDIO_PATH = 'data/audio/test.wav';
-        const VERSION = 'v15';
-        const FPS = 12;
-        const BATCH_SIZE = 8;
-        const TURN_SERVER_URL = '';
-        const TURN_USERNAME = 'webrtc';
-        const TURN_CREDENTIAL = 'my_password';
-        // const DIALOG_ID = 'ea8f6df4-76b8-41f8-a9f9-4ee4d27ebbe3'; // Removed in favor of dynamic dialog creation
-        const SETTINGS_ID = '1765145591841-i6lqzzwui';
-        const COACH_ID = '5dffbc83-e22b-4b48-8127-a7935bdaa275';
-        const USER_ID = 'test';
-        let currentDialogId = null;
+        class UIManager {
+            constructor() {
+                this.videoPlayer = document.getElementById('character-avatar-video');
+                this.staticImage = document.getElementById('character-static-image');
+                this.recordButton = document.getElementById('btnRealtime');
+                this.statusDiv = document.getElementById('status');
+                this.timerDiv = document.getElementById('timer');
+                this.container = document.querySelector('.real-time-container');
+                this.fullscreenBtn = document.getElementById('btnFullscreen');
 
+                this.recordingStartTime = null;
+                this.timerInterval = null;
+                this.recognitionBorderTimeout = null;
 
-        const videoPlayer = document.getElementById('character-avatar-video');
-        const staticImage = document.getElementById('character-static-image');
-        const recordButton = document.getElementById('btnRealtime');
-        const statusDiv = document.getElementById('status');
-        const timerDiv = document.getElementById('timer');
-
-        // Initialize: hide video, show static image
-        if (videoPlayer) {
-            videoPlayer.style.display = 'none';
-        }
-        if (staticImage) {
-            staticImage.style.display = 'block';
-        }
-
-        // WebSocket and audio streaming
-        let socket = null;
-        let audioContext = null;
-        let audioStream = null;
-        let processor = null;
-
-        let isRecording = false;
-        let recognitionActive = false;
-        let recordingStartTime = null;
-        let timerInterval = null;
-        let socketConnectionPromise = null; // Track connection progress
-        let recognitionBorderTimeout = null; // Timeout for hiding the green border
-
-        // WebRTC
-        let pc = null; // WebRTC peer connection
-        let isWebRTCConnected = false;
-        let reconnectAttempts = 0;
-        let maxReconnectAttempts = 5;
-        let isReconnecting = false;
-        let reconnectTimeout = null;
-        let connectingTimeout = null;
-        const CONNECTING_TIMEOUT_MS = 5000; // 5 seconds
-
-        // Helper to wait for ICE gathering to complete
-        function waitForIceGathering(pc) {
-            return new Promise((resolve) => {
-                if (pc.iceGatheringState === 'complete') {
-                    resolve();
-                } else {
-                    function checkState() {
-                        if (pc.iceGatheringState === 'complete') {
-                            pc.removeEventListener('icegatheringstatechange', checkState);
-                            resolve();
-                        }
-                    }
-                    pc.addEventListener('icegatheringstatechange', checkState);
-                    // Fallback timeout in case ICE gathering takes too long
-                    setTimeout(() => {
-                        pc.removeEventListener('icegatheringstatechange', checkState);
-                        resolve();
-                    }, 2000); // 2 second max wait for candidates
-                }
-            });
-        }
-
-        // Initialize WebRTC streaming
-        async function initWebRTCStreaming() {
-            if (pc && isWebRTCConnected) {
-                return;
+                this.init();
             }
 
-            try {
-                // Basic ICE servers
-                const iceServers = [
+            init() {
+                if (this.videoPlayer) this.videoPlayer.style.display = 'none';
+                if (this.staticImage) this.staticImage.style.display = 'block';
+
+                if (this.fullscreenBtn && this.container) {
+                    this.fullscreenBtn.addEventListener('click', () => this.toggleFullscreen());
+                    document.addEventListener('fullscreenchange', () => this.updateFullscreenIcon());
+                }
+            }
+
+            showStatus(message, type = '') {
+                if (!this.statusDiv) return;
+                this.statusDiv.textContent = message;
+                this.statusDiv.className = 'status-indicator ' + type;
+                this.statusDiv.style.display = 'block';
+
+                if (type === 'success') {
+                    setTimeout(() => {
+                        this.statusDiv.style.display = 'none';
+                        this.statusDiv.textContent = '';
+                        this.statusDiv.className = 'status-indicator';
+                    }, 3000);
+                }
+            }
+
+            setButtonLoading(isLoading) {
+                if (isLoading) {
+                    this.recordButton.classList.add('loading');
+                    this.recordButton.disabled = true;
+                } else {
+                    this.recordButton.classList.remove('loading');
+                    this.recordButton.disabled = false;
+                }
+            }
+
+            setRecordingState(isRecording) {
+                if (isRecording) {
+                    this.recordButton.classList.add('recording', 'active');
+                    this.recordButton.innerHTML = '<svg class="ah-icon" width="22" height="22" viewBox="0 0 22 22" fill="#fff" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="10" height="10" rx="2"/></svg><div class="ah-spinner"></div>';
+                    this.recordButton.title = 'Click to stop recording';
+                    this.showStatus('🔴 Recording...', 'loading');
+                    this.startTimer();
+                } else {
+                    this.recordButton.classList.remove('recording', 'active', 'speech-active');
+                    this.recordButton.innerHTML = '<svg class="ah-icon" width="22" height="22" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg"><path d="M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z"/></svg><div class="ah-spinner"></div>';
+                    this.recordButton.title = 'Click to start';
+                    this.stopTimer();
+                }
+            }
+
+            setSpeechActiveState(isActive) {
+                if (isActive) {
+                    this.recordButton.classList.add('speech-active');
+                    clearTimeout(this.recognitionBorderTimeout);
+                    this.recognitionBorderTimeout = setTimeout(() => {
+                        if (this.recordButton) this.recordButton.classList.remove('speech-active');
+                    }, 1000);
+                } else {
+                    this.recordButton.classList.remove('speech-active');
+                    clearTimeout(this.recognitionBorderTimeout);
+                }
+            }
+
+            startTimer() {
+                if (!this.timerDiv) return;
+                this.timerDiv.style.display = 'block';
+                this.recordingStartTime = Date.now();
+                this.timerInterval = setInterval(() => {
+                    const elapsed = Math.floor((Date.now() - this.recordingStartTime) / 1000);
+                    const minutes = Math.floor(elapsed / 60);
+                    const seconds = elapsed % 60;
+                    this.timerDiv.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+                }, 1000);
+            }
+
+            stopTimer() {
+                if (this.timerInterval) {
+                    clearInterval(this.timerInterval);
+                    this.timerInterval = null;
+                }
+                if (this.timerDiv) {
+                    this.timerDiv.style.display = 'none';
+                    this.timerDiv.textContent = '';
+                }
+            }
+
+            showVideo(stream) {
+                if (this.videoPlayer && this.videoPlayer.srcObject !== stream) {
+                    this.videoPlayer.srcObject = stream;
+                }
+                if (this.staticImage) this.staticImage.style.display = 'none';
+                if (this.videoPlayer) this.videoPlayer.style.display = 'block';
+            }
+
+            hideVideo() {
+                if (this.videoPlayer && this.videoPlayer.srcObject) {
+                    this.videoPlayer.srcObject.getTracks().forEach(track => track.stop());
+                    this.videoPlayer.srcObject = null;
+                    this.videoPlayer.style.display = 'none';
+                }
+                if (this.staticImage) this.staticImage.style.display = 'block';
+            }
+
+            toggleFullscreen() {
+                if (!document.fullscreenElement) {
+                    this.container.requestFullscreen().catch(err => {
+                        console.error(`Error attempting to enable fullscreen: ${err.message}`);
+                    });
+                } else {
+                    if (document.exitFullscreen) {
+                        document.exitFullscreen();
+                    }
+                }
+            }
+
+            updateFullscreenIcon() {
+                if (document.fullscreenElement) {
+                    this.fullscreenBtn.innerHTML = `
+                    <svg class="ah-icon" width="24" height="24" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/>
+                    </svg>`;
+                } else {
+                    this.fullscreenBtn.innerHTML = `
+                    <svg class="ah-icon" width="24" height="24" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
+                    </svg>`;
+                }
+            }
+        }
+
+        class WebRTCManager {
+            constructor(uiManager) {
+                this.ui = uiManager;
+                this.pc = null;
+                this.pcWarmup = null;
+                this.isConnected = false;
+                this.reconnectAttempts = 0;
+                this.isReconnecting = false;
+                this.reconnectTimeout = null;
+                this.connectingTimeout = null;
+                this.combinedStream = new MediaStream();
+
+                this.prewarmWebRTC();
+
+                window.addEventListener("online", () => {
+                    console.log("network restored");
+                    if (this.pc && this.pc.connectionState !== "connected") {
+                        this.attemptReconnect();
+                    }
+                });
+            }
+
+            getIceServers() {
+                const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
+                const stunServers = [
                     { urls: 'stun:stun.l.google.com:19302' },
                     { urls: 'stun:stun1.l.google.com:19302' },
                     { urls: 'stun:stun2.l.google.com:19302' },
                     { urls: 'stun:stun.relay.metered.ca:80' }
-
                 ];
 
-                // Add TURN server if specified
-                if (TURN_SERVER_URL && TURN_USERNAME && TURN_CREDENTIAL) {
-                    const turnUrls = [TURN_SERVER_URL];
-                    if (!TURN_SERVER_URL.includes('?transport=')) {
-                        turnUrls.push(`${TURN_SERVER_URL}?transport=tcp`);
+                const turnServers = [];
+                if (CONFIG.WEBRTC.TURN_SERVER_URL && CONFIG.WEBRTC.TURN_USERNAME && CONFIG.WEBRTC.TURN_CREDENTIAL) {
+                    const turnUrls = [CONFIG.WEBRTC.TURN_SERVER_URL];
+                    if (!CONFIG.WEBRTC.TURN_SERVER_URL.includes('?transport=')) {
+                        turnUrls.push(`${CONFIG.WEBRTC.TURN_SERVER_URL}?transport=tcp`);
                     }
-                    iceServers.push({
+                    turnServers.push({
                         urls: turnUrls,
-                        username: TURN_USERNAME,
-                        credential: TURN_CREDENTIAL
+                        username: CONFIG.WEBRTC.TURN_USERNAME,
+                        credential: CONFIG.WEBRTC.TURN_CREDENTIAL
                     });
                 } else {
-                    // Use public TURN servers as fallback
-                    iceServers.push(
-                        {
-                            urls: [
-                                'turn:free.expressturn.com:3478'
-                            ],
-                            username: '000000002083522617',
-                            credential: '6tDY9S5LOEjq4QzVg0I4vdZv8hM='
-                        },
+                    turnServers.push(
+                        { urls: ['turn:free.expressturn.com:3478'], username: '000000002083522617', credential: '6tDY9S5LOEjq4QzVg0I4vdZv8hM=' },
                         {
                             urls: [
                                 'turn:standard.relay.metered.ca:80',
@@ -627,829 +768,539 @@
                     );
                 }
 
-                // Create RTCPeerConnection
-                pc = new RTCPeerConnection({
-                    iceServers: iceServers,
-                    iceCandidatePoolSize: 10
+                if (isMobile) {
+                    return [...stunServers, ...turnServers];
+                }
+                return stunServers;
+            }
+
+            async prewarmWebRTC() {
+                try {
+                    this.pcWarmup = new RTCPeerConnection({
+                        iceServers: this.getIceServers(),
+                        bundlePolicy: "max-bundle",
+                        rtcpMuxPolicy: "require",
+                        iceCandidatePoolSize: 10,
+                        iceTransportPolicy: "all"
+                    });
+                    this.pcWarmup.createDataChannel("warmup");
+                    const offer = await this.pcWarmup.createOffer();
+                    await this.pcWarmup.setLocalDescription(offer);
+                    console.log("WebRTC prewarmed");
+                } catch (e) {
+                    console.error("WebRTC prewarm failed:", e);
+                }
+            }
+
+            waitForIceGathering() {
+                return new Promise((resolve) => {
+                    if (this.pc.iceGatheringState === 'complete') {
+                        resolve();
+                    } else {
+                        const checkState = () => {
+                            if (this.pc.iceGatheringState === 'complete') {
+                                this.pc.removeEventListener('icegatheringstatechange', checkState);
+                                resolve();
+                            }
+                        }
+                        this.pc.addEventListener('icegatheringstatechange', checkState);
+                        setTimeout(() => {
+                            this.pc.removeEventListener('icegatheringstatechange', checkState);
+                            resolve();
+                        }, 2000);
+                    }
                 });
+            }
 
-                // Event handlers
-                pc.oniceconnectionstatechange = () => {
-                    console.log(`ICE connection: ${pc.iceConnectionState}`);
-                    if (pc.iceConnectionState === 'connected') {
-                        isWebRTCConnected = true;
-                        // Reset attempt counter on successful connection
-                        reconnectAttempts = 0;
-                        isReconnecting = false;
-                        if (reconnectTimeout) {
-                            clearTimeout(reconnectTimeout);
-                            reconnectTimeout = null;
-                        }
-                        // Clear connecting timeout
-                        if (connectingTimeout) {
-                            clearTimeout(connectingTimeout);
-                            connectingTimeout = null;
-                        }
-                        showStatus('WebRTC connection established', 'success');
-                        // Connect WebSocket after successful WebRTC establishment
-                        connectWebSocket();
-                    } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-                        isWebRTCConnected = false;
-                        showStatus('WebRTC connection lost', 'error');
-                        // Clear connecting timeout
-                        if (connectingTimeout) {
-                            clearTimeout(connectingTimeout);
-                            connectingTimeout = null;
-                        }
-                        // Disconnect WebSocket on WebRTC connection loss
-                        disconnectWebSocket();
-                        // Automatic reconnection
-                        if (!isReconnecting && reconnectAttempts < maxReconnectAttempts) {
-                            attemptReconnect();
-                        } else if (reconnectAttempts >= maxReconnectAttempts) {
-                            showStatus(`Reconnection attempt limit exceeded (${maxReconnectAttempts})`, 'error');
+            async connect() {
+                if (this.pc && this.isConnected) return Promise.resolve();
+
+                return new Promise(async (resolve, reject) => {
+                    try {
+                        this.pc = new RTCPeerConnection({
+                            iceServers: this.getIceServers(),
+                            bundlePolicy: "max-bundle",
+                            rtcpMuxPolicy: "require",
+                            iceCandidatePoolSize: 10,
+                            iceTransportPolicy: "all"
+                        });
+
+                        this.setupEventHandlers(resolve);
+
+                        this.pc.addTransceiver('video', { direction: 'recvonly' });
+                        this.pc.addTransceiver('audio', { direction: 'recvonly' });
+
+                        const offer = await this.pc.createOffer();
+                        await this.pc.setLocalDescription(offer);
+
+                        this.ui.showStatus('Gathering ICE candidates...', 'loading');
+                        await this.waitForIceGathering();
+
+                        const response = await fetch(`${CONFIG.WEBRTC.API_URL}/api/webrtc/offer`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                sdp: this.pc.localDescription.sdp,
+                                type: this.pc.localDescription.type,
+                                task_id: CONFIG.WEBRTC.TASK_ID,
+                                video_path: CONFIG.WEBRTC.VIDEO_PATH,
+                                audio_path: CONFIG.WEBRTC.AUDIO_PATH,
+                                version: CONFIG.WEBRTC.VERSION,
+                                fps: CONFIG.WEBRTC.FPS,
+                                batch_size: CONFIG.WEBRTC.BATCH_SIZE,
+                                video_hello_text: CONFIG.WEBRTC.VIDEO_HELLO_TEXT,
+                                settings_id: CONFIG.WEBRTC.SETTINGS_ID
+                            })
+                        });
+
+                        if (!response.ok) throw new Error((await response.json()).detail || 'Server error');
+                        const answerData = await response.json();
+                        await this.pc.setRemoteDescription(new RTCSessionDescription(answerData));
+
+                    } catch (error) {
+                        console.error('Error initializing WebRTC:', error);
+                        this.ui.showStatus('WebRTC error: ' + error.message, 'error');
+                        this.close();
+                        reject(error);
+                    }
+                });
+            }
+
+            setupEventHandlers(resolveCallback) {
+                this.pc.oniceconnectionstatechange = () => {
+                    if (this.pc && this.pc.iceConnectionState === 'connected') {
+                        this.isConnected = true;
+                        this.reconnectAttempts = 0;
+                        this.isReconnecting = false;
+                        clearTimeout(this.reconnectTimeout);
+                        clearTimeout(this.connectingTimeout);
+                        this.ui.showStatus('WebRTC connection established', 'success');
+                        if (resolveCallback) resolveCallback();
+                    } else if (this.pc && (this.pc.iceConnectionState === 'failed' || this.pc.iceConnectionState === 'disconnected')) {
+                        this.isConnected = false;
+                        this.ui.showStatus('WebRTC connection lost', 'error');
+                        clearTimeout(this.connectingTimeout);
+                        if (!this.isReconnecting && this.reconnectAttempts < CONFIG.WEBRTC.MAX_RECONNECT_ATTEMPTS) {
+                            this.attemptReconnect();
                         }
                     }
                 };
 
-                pc.onconnectionstatechange = () => {
-                    console.log(`Connection state: ${pc.connectionState}`);
-
-                    // Clear connecting timeout on any state change
-                    if (connectingTimeout) {
-                        clearTimeout(connectingTimeout);
-                        connectingTimeout = null;
-                    }
-
-                    if (pc.connectionState === 'connected') {
-                        // Reset counter on successful connection
-                        reconnectAttempts = 0;
-                        isReconnecting = false;
-                        if (reconnectTimeout) {
-                            clearTimeout(reconnectTimeout);
-                            reconnectTimeout = null;
-                        }
-                        // Ensure WebSocket is connected
-                        if (!socket || !socket.connected) {
-                            connectWebSocket();
-                        }
-                    } else if (pc.connectionState === 'connecting') {
-                        // Set timeout for connecting state
-                        console.log(`Connection state: connecting, setting timeout for ${CONNECTING_TIMEOUT_MS}ms`);
-                        connectingTimeout = setTimeout(() => {
-                            console.log(`Connection timeout: connecting state exceeded ${CONNECTING_TIMEOUT_MS}ms, reconnecting...`);
-                            showStatus('Connection timeout, reconnecting...', 'error');
-                            connectingTimeout = null;
-
-                            // Close current connection
-                            if (pc) {
-                                try {
-                                    pc.close();
-                                } catch (e) {
-                                    console.error(`Error closing connection: ${e}`);
-                                }
-                                pc = null;
+                this.pc.onconnectionstatechange = () => {
+                    clearTimeout(this.connectingTimeout);
+                    if (this.pc && this.pc.connectionState === 'connected') {
+                        this.reconnectAttempts = 0;
+                        this.isReconnecting = false;
+                        clearTimeout(this.reconnectTimeout);
+                        if (resolveCallback) resolveCallback();
+                    } else if (this.pc && this.pc.connectionState === 'connecting') {
+                        this.connectingTimeout = setTimeout(() => {
+                            this.ui.showStatus('Connection timeout, reconnecting...', 'error');
+                            this.close();
+                            if (!this.isReconnecting && this.reconnectAttempts < CONFIG.WEBRTC.MAX_RECONNECT_ATTEMPTS) {
+                                this.attemptReconnect();
                             }
-
-                            // Clear video stream
-                            if (videoPlayer && videoPlayer.srcObject) {
-                                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
-                                videoPlayer.srcObject = null;
-                                videoPlayer.style.display = 'none';
-                            }
-                            // Show static image
-                            if (staticImage) {
-                                staticImage.style.display = 'block';
-                            }
-
-                            // Disconnect WebSocket
-                            disconnectWebSocket();
-
-                            // Try to reconnect
-                            if (!isReconnecting && reconnectAttempts < maxReconnectAttempts) {
-                                attemptReconnect();
-                            } else if (reconnectAttempts >= maxReconnectAttempts) {
-                                showStatus(`Reconnection attempt limit exceeded (${maxReconnectAttempts})`, 'error');
-                            }
-                        }, CONNECTING_TIMEOUT_MS);
-                    } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-                        // Disconnect WebSocket on connection loss
-                        disconnectWebSocket();
-                        // Automatic reconnection
-                        if (!isReconnecting && reconnectAttempts < maxReconnectAttempts) {
-                            attemptReconnect();
+                        }, CONFIG.WEBRTC.CONNECTING_TIMEOUT_MS);
+                    } else if (this.pc && (this.pc.connectionState === 'failed' || this.pc.connectionState === 'disconnected')) {
+                        if (!this.isReconnecting && this.reconnectAttempts < CONFIG.WEBRTC.MAX_RECONNECT_ATTEMPTS) {
+                            this.attemptReconnect();
                         }
                     }
                 };
 
-                pc.onicegatheringstatechange = () => {
-                    console.log(`ICE gathering: ${pc.iceGatheringState}`);
-                };
-
-                pc.onicecandidate = (event) => {
-                    if (event.candidate) {
-                        console.log(`ICE candidate: ${event.candidate.type} ${event.candidate.protocol}`);
+                this.pc.ontrack = (event) => {
+                    const receiver = event.receiver;
+                    if (receiver && 'playoutDelayHint' in receiver) {
+                        receiver.playoutDelayHint = 0.3; // 300ms buffer to align audio and video
                     }
-                };
 
-                // Combine all tracks into a single MediaStream for native A/V sync
-                const combinedStream = new MediaStream();
-                pc.ontrack = (event) => {
-                    console.log(`Media stream received: ${event.track.kind}`);
-                    combinedStream.addTrack(event.track);
-
+                    this.combinedStream.addTrack(event.track);
                     if (event.track.kind === 'video') {
-                        // Assign the combined stream (with both video+audio) to the video element
-                        // The browser will handle A/V synchronization internally
-                        videoPlayer.srcObject = combinedStream;
-                        // Hide static image and show video
-                        if (staticImage) {
-                            //staticImage.style.display = 'none';
-                        }
-                        videoPlayer.style.display = 'block';
-                        showStatus('Video stream received', 'success');
+                        this.ui.showVideo(this.combinedStream);
+                        this.ui.showStatus('Video stream received', 'success');
 
-                        videoPlayer.onloadedmetadata = async () => {
-                            console.log(`Video metadata: ${videoPlayer.videoWidth}x${videoPlayer.videoHeight}`);
-                            // Force play after metadata is loaded
+                        this.ui.videoPlayer.onloadedmetadata = async () => {
                             try {
-                                await videoPlayer.play();
-                                console.log('Video playback started');
+                                await this.ui.videoPlayer.play();
                             } catch (error) {
-                                console.error('Autoplay failed, user interaction required:', error);
-                                showStatus('Click anywhere to start video playback', 'loading');
-                                // Add click handler to start playback
+                                this.ui.showStatus('Click anywhere to start video playback', 'loading');
                                 const startPlayback = async () => {
                                     try {
-                                        await videoPlayer.play();
-                                        console.log('Video playback started after user interaction');
-                                        showStatus('Video playback started', 'success');
-                                        document.removeEventListener('click', startPlayback);
-                                        document.removeEventListener('touchstart', startPlayback);
-                                    } catch (e) {
-                                        console.error('Playback error:', e);
-                                    }
+                                        await this.ui.videoPlayer.play();
+                                        this.ui.showStatus('Video playback started', 'success');
+                                        ['click', 'touchstart'].forEach(e => document.removeEventListener(e, startPlayback));
+                                    } catch (e) { }
                                 };
-                                document.addEventListener('click', startPlayback, { once: true });
-                                document.addEventListener('touchstart', startPlayback, { once: true });
+                                ['click', 'touchstart'].forEach(e => document.addEventListener(e, startPlayback, { once: true }));
                             }
                         };
 
-                        videoPlayer.onplay = () => {
-                            console.log('Video playback started');
-                        };
-
-                        videoPlayer.onerror = (e) => {
-                            console.error('Video error:', e);
-                            showStatus('Video playback error', 'error');
-                            // Show static image on error
-                            if (staticImage) {
-                                staticImage.style.display = 'block';
-                            }
-                            videoPlayer.style.display = 'none';
+                        this.ui.videoPlayer.onerror = () => {
+                            this.ui.showStatus('Video playback error', 'error');
+                            this.ui.hideVideo();
                         };
                     } else if (event.track.kind === 'audio') {
-                        console.log('Audio track added to combined stream for A/V sync');
-                        // Re-assign combined stream if video was already set
-                        // (in case audio arrives after video)
-                        if (videoPlayer.srcObject !== combinedStream) {
-                            videoPlayer.srcObject = combinedStream;
+                        if (this.ui.videoPlayer.srcObject !== this.combinedStream) {
+                            this.ui.videoPlayer.srcObject = this.combinedStream;
                         }
                     }
                 };
-
-                // Add transceivers for receiving video and audio
-                pc.addTransceiver('video', { direction: 'recvonly' });
-                pc.addTransceiver('audio', { direction: 'recvonly' });
-
-                // Create offer
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-
-                // WAIT for ICE gathering to complete before sending offer
-                showStatus('Gathering ICE candidates...', 'loading');
-                console.log('Waiting for ICE gathering to complete...');
-                await waitForIceGathering(pc);
-                console.log('ICE gathering complete, sending offer with candidates');
-
-                console.log('Sending offer to server...');
-
-                // Send offer to server
-                const response = await fetch(`${WEBRTC_API_URL}/api/webrtc/offer`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        sdp: pc.localDescription.sdp, // Use localDescription which contains candidates
-                        type: pc.localDescription.type,
-                        task_id: TASK_ID,
-                        video_path: VIDEO_PATH,
-                        audio_path: AUDIO_PATH,
-                        version: VERSION,
-                        fps: FPS,
-                        batch_size: BATCH_SIZE,
-                        video_hello_text: VIDEO_HELLO_TEXT,
-                        settings_id: SETTINGS_ID
-                    })
-                });
-
-                if (!response.ok) {
-                    const error = await response.json();
-                    throw new Error(error.detail || 'Server error');
-                }
-
-                const answerData = await response.json();
-                console.log('Answer received from server');
-
-                // Set remote description
-                await pc.setRemoteDescription(new RTCSessionDescription(answerData));
-                console.log('WebRTC connection established');
-                isWebRTCConnected = true;
-
-            } catch (error) {
-                console.error('Error initializing WebRTC:', error);
-                showStatus('WebRTC error: ' + error.message, 'error');
-                if (pc) {
-                    pc.close();
-                    pc = null;
-                }
-                isWebRTCConnected = false;
-            }
-        }
-
-        // Automatic reconnection function
-        async function attemptReconnect() {
-            if (isReconnecting) {
-                return; // Reconnection already in progress
             }
 
-            isReconnecting = true;
-            reconnectAttempts++;
+            async attemptReconnect() {
+                if (this.isReconnecting) return;
+                this.isReconnecting = true;
+                this.reconnectAttempts++;
 
-            console.log(`Reconnection attempt ${reconnectAttempts}/${maxReconnectAttempts}...`);
-            showStatus(`Reconnection attempt ${reconnectAttempts}/${maxReconnectAttempts}...`, 'loading');
+                this.ui.showStatus(`Reconnection attempt ${this.reconnectAttempts}/${CONFIG.WEBRTC.MAX_RECONNECT_ATTEMPTS}...`, 'loading');
+                this.close();
 
-            // Clear connecting timeout
-            if (connectingTimeout) {
-                clearTimeout(connectingTimeout);
-                connectingTimeout = null;
-            }
-
-            // Close current connection
-            if (pc) {
-                try {
-                    pc.close();
-                } catch (e) {
-                    console.error(`Error closing connection: ${e}`);
-                }
-                pc = null;
-            }
-
-            // Clear video stream
-            if (videoPlayer && videoPlayer.srcObject) {
-                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
-                videoPlayer.srcObject = null;
-                videoPlayer.style.display = 'none';
-            }
-            // Show static image
-            if (staticImage) {
-                staticImage.style.display = 'block';
-            }
-
-            // Exponential delay before reconnection (maximum 10 seconds)
-            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 10000);
-            console.log(`Waiting ${delay}ms before reconnection...`);
-
-            reconnectTimeout = setTimeout(async () => {
-                try {
-                    await initWebRTCStreaming();
-                    console.log('Reconnection successful');
-                    showStatus('Reconnection successful', 'success');
-                } catch (e) {
-                    console.error(`Error during reconnection: ${e}`);
-                    if (reconnectAttempts < maxReconnectAttempts) {
-                        isReconnecting = false; // Allow next attempt
-                        attemptReconnect(); // Try again
-                    } else {
-                        isReconnecting = false;
-                        showStatus('Failed to restore connection after all attempts', 'error');
-                    }
-                }
-            }, delay);
-        }
-
-        // Initialize on page load - REMOVED automatic init, now handling via button
-        // initWebRTCStreaming();
-
-        async function createDialog() {
-            try {
-                console.log('Creating new dialog...');
-                showStatus('Creating dialog...', 'loading');
-                const response = await fetch(`${CHAT_API_BASE_URL}/dialogs`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${AUTH_TOKEN}`,
-                    },
-                    body: JSON.stringify({
-                        coach_id: COACH_ID,
-                        user_id: USER_ID,
-                        metadata: {
-                            source: "video"
+                const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 10000);
+                this.reconnectTimeout = setTimeout(async () => {
+                    try {
+                        await this.connect();
+                        this.ui.showStatus('Reconnection successful', 'success');
+                        this.isReconnecting = false;
+                    } catch (e) {
+                        if (this.reconnectAttempts < CONFIG.WEBRTC.MAX_RECONNECT_ATTEMPTS) {
+                            this.isReconnecting = false;
+                            this.attemptReconnect();
+                        } else {
+                            this.isReconnecting = false;
+                            this.ui.showStatus('Failed to restore connection', 'error');
                         }
-                    }),
-                });
+                    }
+                }, delay);
+            }
 
-                if (!response.ok) {
-                    throw new Error(`Failed to create dialog: ${response.statusText}`);
+            close() {
+                if (this.pc) {
+                    try { this.pc.close(); } catch (e) { }
+                    this.pc = null;
                 }
-
-                const data = await response.json();
-                console.log('Dialog created:', data);
-                return data.id;
-            } catch (error) {
-                console.error('Error creating dialog:', error);
-                showStatus('Error creating dialog: ' + error.message, 'error');
-                throw error;
+                this.isConnected = false;
+                clearTimeout(this.reconnectTimeout);
+                clearTimeout(this.connectingTimeout);
+                this.ui.hideVideo();
+                this.combinedStream = new MediaStream(); // resets Stream cache
             }
         }
 
-        // WebSocket connection for speech recognition
-        function connectWebSocket() {
-            // Check that WebRTC connection is established
-            if (!isWebRTCConnected) {
-                console.log('WebSocket: WebRTC not connected yet, skipping WebSocket connection');
-                return Promise.resolve();
+        class VoiceManager {
+            constructor(uiManager) {
+                this.ui = uiManager;
+                this.socket = null;
+                this.currentDialogId = null;
+                this.audioContext = null;
+                this.workletNode = null;
+                this.audioStream = null;
+                this.isRecording = false;
+                this.recognitionActive = false;
+                this.socketConnectionPromise = null;
             }
 
-            if (socket && socket.connected) {
-                return Promise.resolve();
-            }
-
-            // Return existing promise if already connecting
-            if (socketConnectionPromise) {
-                return socketConnectionPromise;
-            }
-
-            socketConnectionPromise = (async () => {
-                // Create dialog if needed
-                if (!currentDialogId) {
-                    try {
-                        currentDialogId = await createDialog();
-                    } catch (error) {
-                        console.error('Cannot connect WebSocket without dialog ID');
-                        socketConnectionPromise = null;
-                        throw error;
-                    }
+            async createDialog() {
+                try {
+                    this.ui.showStatus('Creating dialog...', 'loading');
+                    const response = await fetch(`${CONFIG.WEBRTC.CHAT_API_URL}/dialogs`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${CONFIG.WEBSOCKET.AUTH_TOKEN}`,
+                        },
+                        body: JSON.stringify({
+                            coach_id: CONFIG.WEBRTC.COACH_ID,
+                            user_id: CONFIG.WEBRTC.USER_ID,
+                            metadata: { source: "video" }
+                        }),
+                    });
+                    if (!response.ok) throw new Error(`Failed to create dialog: ${response.statusText}`);
+                    const data = await response.json();
+                    return data.id;
+                } catch (error) {
+                    this.ui.showStatus('Error creating dialog: ' + error.message, 'error');
+                    throw error;
                 }
+            }
 
-                return new Promise((resolve, reject) => {
-                    try {
-                        // Collect query parameters
+            connectWebSocket() {
+                if (this.socket && this.socket.connected) return Promise.resolve();
+                if (this.socketConnectionPromise) return this.socketConnectionPromise;
+
+                this.socketConnectionPromise = (async () => {
+                    if (!this.currentDialogId) {
+                        this.currentDialogId = await this.createDialog();
+                    }
+
+                    return new Promise((resolve, reject) => {
                         const query = {
-                            task_id: TASK_ID,
-                            dialog_id: currentDialogId,
-                            settings_id: SETTINGS_ID
+                            task_id: CONFIG.WEBRTC.TASK_ID,
+                            dialog_id: this.currentDialogId,
+                            settings_id: CONFIG.WEBRTC.SETTINGS_ID
                         };
 
-                        socket = io(WEBSOCKET_SERVER_URL, {
-                            path: WEBSOCKET_PATH,
-                            auth: {
-                                token: AUTH_TOKEN
-                            },
+                        this.socket = io(CONFIG.WEBSOCKET.URL, {
+                            path: CONFIG.WEBSOCKET.PATH,
+                            auth: { token: CONFIG.WEBSOCKET.AUTH_TOKEN },
                             query: query,
                             transports: ['websocket', 'polling']
                         });
 
-                        socket.on('connect', () => {
-                            console.log('WebSocket connected');
-                            showStatus('WebSocket connected', 'success');
+                        this.socket.on('connect', () => {
+                            this.ui.showStatus('WebSocket connected', 'success');
                             resolve();
                         });
 
-                        socket.on('disconnect', () => {
-                            console.log('WebSocket disconnected');
-                            showStatus('WebSocket disconnected', 'error');
-                            socketConnectionPromise = null; // Reset promise on disconnect
-                            if (isRecording) {
-                                stopRecording();
-                            }
+                        this.socket.on('disconnect', () => {
+                            this.ui.showStatus('WebSocket disconnected', 'error');
+                            this.socketConnectionPromise = null;
+                            if (this.isRecording) this.stopRecording();
                         });
 
-                        socket.on('connect_error', (error) => {
-                            console.error('WebSocket connection error:', error);
-                            showStatus('WebSocket connection error: ' + error.message, 'error');
-                            socketConnectionPromise = null; // Reset promise on error
+                        this.socket.on('connect_error', (error) => {
+                            this.ui.showStatus('WebSocket connection error: ' + error.message, 'error');
+                            this.socketConnectionPromise = null;
                             reject(error);
                         });
 
-                        socket.on('recognition-started', (data) => {
-                            console.log('Recognition started:', data);
-                            recognitionActive = true;
-                            // recordButton.classList.add('speech-active'); // Removed: Only show on results
-                            showStatus('Recognition started', 'success');
+                        this.socket.on('recognition-started', () => {
+                            this.recognitionActive = true;
+                            this.ui.showStatus('Recognition started', 'success');
                         });
 
-                        socket.on('recognition-result', (data) => {
-                            console.log('Recognition result:', data);
-
-                            // Show active border when receiving results
-                            recordButton.classList.add('speech-active');
-
-                            // Clear existing timeout
-                            if (recognitionBorderTimeout) {
-                                clearTimeout(recognitionBorderTimeout);
-                            }
-
-                            // Hide border after 1 second of no results
-                            recognitionBorderTimeout = setTimeout(() => {
-                                // double check we are still recording before removing, although removing harmlessly
-                                recordButton.classList.remove('speech-active');
-                            }, 1000);
+                        this.socket.on('recognition-result', () => {
+                            this.ui.setSpeechActiveState(true);
                         });
 
-                        socket.on('recognition-error', (data) => {
-                            console.error('Recognition error:', data);
-                            showStatus('Recognition error: ' + data.message, 'error');
-                            recordButton.classList.remove('speech-active'); // Disable green border
-                            if (isRecording) {
-                                stopRecording();
-                            }
+                        this.socket.on('recognition-error', (data) => {
+                            this.ui.showStatus('Recognition error: ' + data.message, 'error');
+                            this.ui.setSpeechActiveState(false);
+                            if (this.isRecording) this.stopRecording();
                         });
 
-                        socket.on('recognition-stopped', (data) => {
-                            console.log('Recognition stopped:', data);
-                            recognitionActive = false;
-                            recordButton.classList.remove('speech-active'); // Disable green border
-                            showStatus('Recognition stopped', 'success');
+                        this.socket.on('recognition-stopped', () => {
+                            this.recognitionActive = false;
+                            this.ui.setSpeechActiveState(false);
+                            this.ui.showStatus('Recognition stopped', 'success');
                         });
-
-                    } catch (error) {
-                        console.error('Error connecting WebSocket:', error);
-                        showStatus('Connection error: ' + error.message, 'error');
-                        socketConnectionPromise = null;
-                        reject(error);
-                    }
-                });
-            })();
-
-            return socketConnectionPromise;
-        }
-
-        // Disconnect WebSocket
-        function disconnectWebSocket() {
-            if (socket) {
-                socketConnectionPromise = null;
-                if (isRecording) {
-                    stopRecording();
-                }
-                socket.disconnect();
-                socket = null;
-                console.log('WebSocket disconnected');
-            }
-        }
-
-        // Audio recording with continuous WebSocket streaming
-        recordButton.addEventListener('click', async () => {
-            if (isRecording) {
-                stopRecording();
-                return;
-            }
-
-            // Check if we need to connect first
-            if (!isWebRTCConnected) {
-                try {
-                    setButtonLoading(true);
-                    await initWebRTCStreaming();
-                    // After successful connection, start recording
-                    await startRecording();
-                } catch (error) {
-                    console.error('Connection failed:', error);
-                    showStatus('Connection failed', 'error');
-                } finally {
-                    setButtonLoading(false);
-                }
-            } else {
-                // Already connected, just start recording
-                await startRecording();
-            }
-        });
-
-        function setButtonLoading(isLoading) {
-            if (isLoading) {
-                recordButton.classList.add('loading');
-                recordButton.disabled = true;
-            } else {
-                recordButton.classList.remove('loading');
-                recordButton.disabled = false;
-            }
-        }
-
-        // Helper function for cross-browser getUserMedia
-        function getUserMedia(constraints) {
-            // Check if navigator.mediaDevices is defined
-            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                return navigator.mediaDevices.getUserMedia(constraints);
-            }
-
-            // Legacy/Polyfill
-            const getUserMediaPrefixed = navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia;
-
-            if (getUserMediaPrefixed) {
-                return new Promise((resolve, reject) => {
-                    getUserMediaPrefixed.call(navigator, constraints, resolve, reject);
-                });
-            }
-
-            return Promise.reject(new Error('getUserMedia is not supported in this browser or environment (MediaDevices API missing).'));
-        }
-
-        async function startRecording() {
-            // Check that WebRTC connection is established
-            if (!isWebRTCConnected) {
-                showStatus('Please wait for WebRTC connection to be established', 'error');
-                return;
-            }
-
-            // Connect WebSocket if not connected
-            if (!socket || !socket.connected) {
-                try {
-                    await connectWebSocket();
-                } catch (e) {
-                    console.error("Failed to connect WebSocket", e);
-                    showStatus('Failed to connect to recognition server', 'error');
-                    return;
-                }
-            }
-
-            if (!socket || !socket.connected) {
-                showStatus('Failed to connect to recognition server', 'error');
-                return;
-            }
-
-            try {
-                // Request microphone access using a helper to handle compatibility
-                try {
-                    audioStream = await getUserMedia({
-                        audio: {
-                            channelCount: 1,
-                            sampleRate: 16000,
-                            echoCancellation: true,
-                            noiseSuppression: true,
-                        }
                     });
-                } catch (err) {
-                    if (window.location.protocol === 'http:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-                        throw new Error('Microphone access requires HTTPS. Please serve this page over HTTPS or localhost.');
-                    }
-                    throw err;
+                })();
+
+                return this.socketConnectionPromise;
+            }
+
+            disconnectWebSocket() {
+                if (this.socket) {
+                    this.socketConnectionPromise = null;
+                    if (this.isRecording) this.stopRecording();
+                    this.socket.disconnect();
+                    this.socket = null;
+                }
+            }
+
+            async setupAudioWorklet() {
+                if (this.audioContext && this.audioContext.state === 'suspended') {
+                    await this.audioContext.resume();
                 }
 
-                // Create AudioContext with required sample rate
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                    sampleRate: 16000
-                });
+                // Generates an inline AudioWorklet script URL
+                const workletCode = `
+                    class PCMProcessor extends AudioWorkletProcessor {
+                        constructor() {
+                            super();
+                            this.bufferSize = 4096;
+                            this.buffer = new Float32Array(this.bufferSize);
+                            this.bufferIndex = 0;
+                        }
+                        
+                        process(inputs, outputs, parameters) {
+                            const input = inputs[0];
+                            if (!input || input.length === 0) return true;
+                            
+                            const channelData = input[0];
+                            for (let i = 0; i < channelData.length; i++) {
+                                this.buffer[this.bufferIndex++] = channelData[i];
+                                
+                                if (this.bufferIndex >= this.bufferSize) {
+                                    const int16Array = new Int16Array(this.bufferSize);
+                                    for (let j = 0; j < this.bufferSize; j++) {
+                                        const s = Math.max(-1, Math.min(1, this.buffer[j]));
+                                        int16Array[j] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                                    }
+                                    this.port.postMessage(int16Array.buffer, [int16Array.buffer]);
+                                    this.bufferIndex = 0;
+                                }
+                            }
+                            
+                            // To prevent feedback loops while ensuring browser doesn't GC the node
+                            if (outputs && outputs[0] && outputs[0][0]) {
+                                outputs[0][0].fill(0);
+                            }
+                            return true;
+                        }
+                    }
+                    registerProcessor('pcm-processor', PCMProcessor);
+                `;
 
-                const source = audioContext.createMediaStreamSource(audioStream);
+                const blob = new Blob([workletCode], { type: 'application/javascript' });
+                const workletUrl = URL.createObjectURL(blob);
 
-                // Create ScriptProcessorNode for audio data processing
-                // bufferSize: 4096 gives approximately 256ms of audio at 16kHz
-                processor = audioContext.createScriptProcessor(4096, 1, 1);
+                try {
+                    await this.audioContext.audioWorklet.addModule(workletUrl);
+                } catch (e) {
+                    console.error("AudioWorklet exception:", e);
+                    throw e;
+                }
 
-                processor.onaudioprocess = (e) => {
-                    if (!isRecording || !socket || !socket.connected || !recognitionActive) {
+                this.workletNode = new AudioWorkletNode(this.audioContext, 'pcm-processor');
+                this.workletNode.port.onmessage = (event) => {
+                    if (this.isRecording && this.socket && this.socket.connected && this.recognitionActive) {
+                        this.socket.emit('audio-chunk', new Uint8Array(event.data));
+                    }
+                };
+            }
+
+            getCrossBrowserUserMedia(constraints) {
+                if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                    return navigator.mediaDevices.getUserMedia(constraints);
+                }
+                const getUserMediaPrefixed = navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia;
+                if (getUserMediaPrefixed) {
+                    return new Promise((resolve, reject) => getUserMediaPrefixed.call(navigator, constraints, resolve, reject));
+                }
+                return Promise.reject(new Error('getUserMedia is not supported'));
+            }
+
+            async startRecording() {
+                try {
+                    await this.connectWebSocket();
+
+                    try {
+                        this.audioStream = await this.getCrossBrowserUserMedia({
+                            audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true }
+                        });
+                    } catch (err) {
+                        if (window.location.protocol === 'http:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+                            throw new Error('Microphone access requires HTTPS.');
+                        }
+                        throw err;
+                    }
+
+                    this.audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                    await this.setupAudioWorklet();
+
+                    const source = this.audioContext.createMediaStreamSource(this.audioStream);
+                    source.connect(this.workletNode);
+                    this.workletNode.connect(this.audioContext.destination);
+
+                    this.socket.emit('start-recognition', { languageCode: CONFIG.WEBSOCKET.LANGUAGE_CODE });
+
+                    this.isRecording = true;
+                    this.ui.setRecordingState(true);
+
+                } catch (error) {
+                    this.ui.showStatus('Error starting recording: ' + error.message, 'error');
+                    console.error('Recording error:', error);
+                }
+            }
+
+            stopRecording() {
+                if (this.workletNode) {
+                    this.workletNode.disconnect();
+                    this.workletNode = null;
+                }
+                if (this.audioContext) {
+                    this.audioContext.close().catch(console.error);
+                    this.audioContext = null;
+                }
+                if (this.audioStream) {
+                    this.audioStream.getTracks().forEach(track => track.stop());
+                    this.audioStream = null;
+                }
+                if (this.socket && this.socket.connected && this.recognitionActive) {
+                    this.socket.emit('stop-recognition');
+                }
+                this.isRecording = false;
+                this.recognitionActive = false;
+                this.ui.setSpeechActiveState(false);
+                this.ui.setRecordingState(false);
+            }
+        }
+
+        class App {
+            constructor() {
+                this.ui = new UIManager();
+                this.webrtc = new WebRTCManager(this.ui);
+                this.voice = new VoiceManager(this.ui);
+
+                this.waitingContainer = document.getElementById('connection-waiting');
+                this.btnRealtime = document.getElementById('btnRealtime');
+
+                this.checkInstanceStatus();
+
+                this.ui.recordButton.addEventListener('click', async () => {
+                    if (this.voice.isRecording) {
+                        this.voice.stopRecording();
+                        this.webrtc.close();
+                        this.voice.disconnectWebSocket();
+                        this.ui.showStatus('Connection and recording stopped', 'success');
                         return;
                     }
 
-                    // Get PCM data (Float32Array)
-                    const inputData = e.inputBuffer.getChannelData(0);
+                    this.ui.setButtonLoading(true);
 
-                    // Convert Float32 (-1.0 to 1.0) to Int16 (-32768 to 32767)
-                    const int16Array = new Int16Array(inputData.length);
-                    for (let i = 0; i < inputData.length; i++) {
-                        // Clamp value between -1 and 1
-                        const s = Math.max(-1, Math.min(1, inputData[i]));
-                        // Convert to 16-bit integer
-                        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    try {
+                        // Connect WebRTC 
+                        if (!this.webrtc.isConnected) {
+                            await this.webrtc.connect();
+                        }
+                        // Start recording once connected
+                        await this.voice.startRecording();
+                    } catch (e) {
+                        this.ui.showStatus('Connection failed', 'error');
+                    } finally {
+                        this.ui.setButtonLoading(false);
                     }
-
-                    // Send as Uint8Array (bytes)
-                    socket.emit('audio-chunk', new Uint8Array(int16Array.buffer));
-                };
-
-                source.connect(processor);
-                processor.connect(audioContext.destination);
-
-                // Start recognition on server
-                socket.emit('start-recognition', { languageCode: LANGUAGE_CODE });
-
-                isRecording = true;
-                recordingStartTime = Date.now();
-                recordButton.classList.add('recording', 'active');
-                recordButton.innerHTML = '<svg class="ah-icon" width="22" height="22" viewBox="0 0 22 22" fill="#fff" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="10" height="10" rx="2"/></svg><div class="ah-spinner"></div>';
-                recordButton.title = 'Click to stop recording';
-                showStatus('🔴 Recording...', 'loading');
-                startTimer();
-
-            } catch (error) {
-                showStatus('Error starting recording: ' + error.message, 'error');
-                console.error('Recording error:', error);
-            }
-        }
-
-        function stopRecording() {
-            // Stop Audio
-            if (processor) {
-                processor.disconnect();
-                processor = null;
-            }
-
-            if (audioContext) {
-                audioContext.close().catch(console.error);
-                audioContext = null;
-            }
-
-            if (audioStream) {
-                audioStream.getTracks().forEach(track => track.stop());
-                audioStream = null;
-            }
-
-            if (socket && socket.connected && recognitionActive) {
-                socket.emit('stop-recognition');
-            }
-
-            // Stop WebRTC
-            if (pc) {
-                try {
-                    pc.close();
-                } catch (e) {
-                    console.error(`Error closing connection: ${e}`);
-                }
-                pc = null;
-            }
-            isWebRTCConnected = false;
-
-            // Clear reconnection timers
-            if (reconnectTimeout) {
-                clearTimeout(reconnectTimeout);
-                reconnectTimeout = null;
-            }
-            if (connectingTimeout) {
-                clearTimeout(connectingTimeout);
-                connectingTimeout = null;
-            }
-            isReconnecting = false;
-            reconnectAttempts = 0;
-
-            // Reset UI
-            if (videoPlayer && videoPlayer.srcObject) {
-                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
-                videoPlayer.srcObject = null;
-                videoPlayer.style.display = 'none';
-            }
-            if (staticImage) {
-                staticImage.style.display = 'block';
-            }
-
-            isRecording = false;
-            recognitionActive = false;
-
-            if (recognitionBorderTimeout) {
-                clearTimeout(recognitionBorderTimeout);
-                recognitionBorderTimeout = null;
-            }
-
-            recordButton.classList.remove('recording', 'active', 'speech-active'); // Ensure green border is removed
-            recordButton.innerHTML = '<svg class="ah-icon" width="22" height="22" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg"><path d="M17 10.5V7C17 6.45 16.55 6 16 6H4C3.45 6 3 6.45 3 7V17C3 17.55 3.45 18 4 18H16C16.55 18 17 17.55 17 17V13.5L21 17.5V6.5L17 10.5Z"/></svg><div class="ah-spinner"></div>';
-            recordButton.title = 'Click to start';
-            stopTimer();
-            showStatus('Connection and recording stopped', 'success');
-        }
-
-        function startTimer() {
-            if (timerDiv) {
-                timerDiv.style.display = 'block';
-                timerInterval = setInterval(() => {
-                    const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
-                    const minutes = Math.floor(elapsed / 60);
-                    const seconds = elapsed % 60;
-                    timerDiv.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-                }, 1000);
-            }
-        }
-
-        function stopTimer() {
-            if (timerInterval) {
-                clearInterval(timerInterval);
-                timerInterval = null;
-            }
-            if (timerDiv) {
-                timerDiv.style.display = 'none';
-                timerDiv.textContent = '';
-            }
-        }
-
-        function showStatus(message, type = '') {
-            if (statusDiv) {
-                statusDiv.textContent = message;
-                statusDiv.className = 'status-indicator ' + type;
-                statusDiv.style.display = 'block';
-
-                if (type === 'success') {
-                    setTimeout(() => {
-                        statusDiv.style.display = 'none';
-                        statusDiv.textContent = '';
-                        statusDiv.className = 'status-indicator';
-                    }, 3000);
-                }
-            }
-        }
-
-        // Cleanup on page close
-        window.addEventListener('beforeunload', () => {
-            // Stop recording if active
-            if (isRecording) {
-                stopRecording();
-            }
-
-            // Clear connecting timeout
-            if (connectingTimeout) {
-                clearTimeout(connectingTimeout);
-                connectingTimeout = null;
-            }
-
-            // Disconnect WebSocket
-            if (socket) {
-                socket.disconnect();
-                socket = null;
-            }
-
-            // Cancel reconnection if scheduled
-            if (reconnectTimeout) {
-                clearTimeout(reconnectTimeout);
-                reconnectTimeout = null;
-            }
-            isReconnecting = false;
-
-            // Disconnect WebSocket
-            disconnectWebSocket();
-
-            // Close WebRTC connection
-            if (pc) {
-                pc.close();
-                pc = null;
-            }
-            if (videoPlayer && videoPlayer.srcObject) {
-                videoPlayer.srcObject.getTracks().forEach(track => track.stop());
-                videoPlayer.srcObject = null;
-                videoPlayer.style.display = 'none';
-            }
-            // Show static image
-            if (staticImage) {
-                staticImage.style.display = 'block';
-            }
-
-            // Stop audio stream
-            if (audioStream) {
-                audioStream.getTracks().forEach(track => track.stop());
-                audioStream = null;
-            }
-        });
-        // Fullscreen Logic
-        const container = document.querySelector('.real-time-container');
-        const fullscreenBtn = document.getElementById('btnFullscreen');
-
-        function toggleFullscreen() {
-            if (!document.fullscreenElement) {
-                container.requestFullscreen().catch(err => {
-                    console.error(`Error attempting to enable fullscreen: ${err.message}`);
                 });
-            } else {
-                if (document.exitFullscreen) {
-                    document.exitFullscreen();
+
+                window.addEventListener('beforeunload', () => {
+                    this.voice.stopRecording();
+                    this.voice.disconnectWebSocket();
+                    this.webrtc.close();
+                });
+            }
+
+            async checkInstanceStatus() {
+                try {
+                    const response = await fetch(`${CONFIG.WATCHER_URL}/status/${CONFIG.INSTANCE_NAME}`);
+                    if (response.ok) {
+                        const data = await response.json();
+                        const status = data.instance ? data.instance.status : null;
+
+                        if (status === 'RUNNING') {
+                            if (this.waitingContainer) this.waitingContainer.style.display = 'none';
+                            if (this.btnRealtime) this.btnRealtime.style.display = 'flex';
+                            return;
+                        } else if (status !== 'STARTING') {
+                            try {
+                                await fetch(`${CONFIG.WATCHER_URL}/start`, {
+                                    method: 'POST'
+                                });
+                            } catch (startError) {
+                                console.error('Error starting instance:', startError);
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error checking instance status:', error);
                 }
+
+                setTimeout(() => this.checkInstanceStatus(), 5000);
             }
         }
 
-        function updateFullscreenIcon() {
-            if (document.fullscreenElement) {
-                // Change to Minimize icon (Exit Fullscreen)
-                fullscreenBtn.innerHTML = `
-                <svg class="ah-icon" width="24" height="24" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/>
-                </svg>`;
-            } else {
-                // Change to Maximize icon (Enter Fullscreen)
-                fullscreenBtn.innerHTML = `
-                <svg class="ah-icon" width="24" height="24" viewBox="0 0 24 24" fill="#fff" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
-                </svg>`;
-            }
-        }
-
-        fullscreenBtn.addEventListener('click', toggleFullscreen);
-        document.addEventListener('fullscreenchange', updateFullscreenIcon);
+        // Initialize App
+        const app = new App();
     </script>
 </body>
 

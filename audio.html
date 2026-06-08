@@ -613,6 +613,7 @@
                 // Create RTCPeerConnection
                 pc = new RTCPeerConnection({
                     iceServers: iceServers,
+                    bundlePolicy: "max-bundle",
                     iceCandidatePoolSize: 10
                 });
 
