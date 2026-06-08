@@ -123,7 +123,13 @@ class DelayedMediaPlayerTrack(AudioStreamTrack):
                     logger.info(f"[DelayedMediaPlayerTrack] 🔄 Syncing PTS: Jump from {self.next_pts} to {new_audio_pts}")
                     self.next_pts = new_audio_pts
 
-            logger.info(f"[DelayedMediaPlayerTrack] ✓ Аудио запущено")
+            audio_offset_sec = float(os.getenv("AUDIO_SYNC_OFFSET", "0.2"))
+            self.silence_frames_to_inject = int(audio_offset_sec * 48000 / 480)
+            logger.info(f"[DelayedMediaPlayerTrack] ✓ Аудио запущено. Инжект тишины: {self.silence_frames_to_inject} кадров ({audio_offset_sec}s)")
+
+        if getattr(self, 'silence_frames_to_inject', 0) > 0:
+            self.silence_frames_to_inject -= 1
+            return self._create_silence_frame(480)
         
         if self.media_player and self.media_player.audio:
             try:
@@ -526,6 +532,48 @@ class VideoStreamGenerator(VideoStreamTrack):
             self.loop.call_soon_threadsafe(add_batch_non_blocking)
         except Exception as e:
             logger.error(f"[VideoStreamGenerator] Ошибка при добавлении батча кадров: {e}")
+
+    async def add_frames_batch_async(self, frame_arrays):
+        """
+        Добавляет несколько кадров в очередь батчем с ожиданием места (для asyncio).
+        """
+        if not self.running or not self.loop:
+            return
+        
+        if not frame_arrays or len(frame_arrays) == 0:
+            return
+            
+        valid_frames = []
+        for frame_array in frame_arrays:
+            if frame_array is None or len(frame_array.shape) != 3 or frame_array.shape[2] != 3:
+                continue
+            
+            if frame_array.dtype != np.uint8:
+                if frame_array.max() > 1.0:
+                    frame_array = (frame_array / 255.0).clip(0, 1)
+                frame_array = (frame_array * 255).astype(np.uint8)
+            
+            valid_frames.append(frame_array.copy())
+            
+        if len(valid_frames) == 0:
+            return
+            
+        added_count = 0
+        for frame in valid_frames:
+            try:
+                # Ожидаем места в очереди, чтобы не терять кадры!
+                await self.frame_queue.put(frame)
+                added_count += 1
+            except Exception as e:
+                logger.error(f"[VideoStreamGenerator] Ошибка при добавлении кадра: {e}")
+                
+        if added_count > 0:
+            with self.first_real_frame_lock:
+                if not self.first_real_frame_sent:
+                    self.first_real_frame_sent = True
+            
+            with self.last_frame_lock:
+                self.last_frame = valid_frames[added_count-1].copy()
     
     def __repr__(self):
         return f"VideoStreamGenerator(fps={self.fps}, running={self.running}, queue_size={self.frame_queue.qsize()})"
@@ -581,7 +629,7 @@ class VideoStreamGenerator(VideoStreamTrack):
             conversion_start = time.time()
             try:
                 frame = VideoFrame.from_ndarray(frame_array, format="bgr24")
-                frame = frame.reformat(format="yuv420p")
+                #frame = frame.reformat(format="yuv420p")
                 conversion_time = time.time() - conversion_start
                 
                 with self.metrics_lock:
@@ -591,7 +639,7 @@ class VideoStreamGenerator(VideoStreamTrack):
             except Exception as e:
                 try:
                     frame = VideoFrame.from_ndarray(frame_array, format="rgb24")
-                    frame = frame.reformat(format="yuv420p")
+                    #frame = frame.reformat(format="yuv420p")
                 except Exception as e2:
                     raise
             
@@ -693,6 +741,35 @@ class VideoStreamGenerator(VideoStreamTrack):
             
         except Exception as e:
             logger.error(f"[VideoStreamGenerator] Ошибка при обработке кадра: {e}", exc_info=True)
+
+    async def add_frame_async(self, frame_array):
+        """Добавляет кадр в очередь с ожиданием места (вызывается из asyncio loop)"""
+        if not self.running or not self.loop or frame_array is None:
+            return
+        
+        if len(frame_array.shape) != 3 or frame_array.shape[2] != 3:
+            return
+        
+        try:
+            if frame_array.dtype != np.uint8:
+                if frame_array.max() > 1.0:
+                    frame_array = (frame_array / 255.0).clip(0, 1)
+                frame_array = (frame_array * 255).astype(np.uint8)
+            
+            frame_final = frame_array.copy()
+            
+            # Ожидаем место, если очередь переполнена, кадры НЕ будут пропущены
+            await self.frame_queue.put(frame_final)
+            
+            with self.first_real_frame_lock:
+                if not self.first_real_frame_sent:
+                    self.first_real_frame_sent = True
+            
+            with self.last_frame_lock:
+                self.last_frame = frame_final.copy()
+                
+        except Exception as e:
+            logger.error(f"[VideoStreamGenerator] Ошибка при async обработке кадра: {e}", exc_info=True)
     
     def stop(self):
         """Останавливает поток и очищает очередь"""
@@ -753,7 +830,7 @@ class VideoStreamGenerator(VideoStreamTrack):
                 # Check cancellation?
                 
                 # Send frame
-                self.add_frame(frame)
+                await self.add_frame_async(frame)
                 
                 # Pacing
                 next_frame_time += frame_interval

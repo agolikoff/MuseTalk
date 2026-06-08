@@ -345,6 +345,7 @@
                 // Create RTCPeerConnection
                 pc = new RTCPeerConnection({
                     iceServers: iceServers,
+                    bundlePolicy: "max-bundle",
                     // ICE settings for better compatibility
                     iceCandidatePoolSize: 10
                 });

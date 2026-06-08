@@ -19,3 +19,4 @@ exp_out
 /.venv311
 streaming_webrtc_api-old.py
 *.sql
+/data

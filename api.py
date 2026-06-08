@@ -4,6 +4,7 @@ import tempfile
 from omegaconf import OmegaConf
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
+from pydub import AudioSegment
 
 api = FastAPI()
 
@@ -52,7 +53,16 @@ async def run_inference(
     audio_path = os.path.join(AUDIO_DIR, f"{param}.wav")
     with open(audio_path, "wb") as f:
         f.write(await input_file.read())
-    
+        
+    # Append 2 seconds of silence
+    try:
+        audio_segment = AudioSegment.from_file(audio_path)
+        silence = AudioSegment.silent(duration=2000)
+        padded_audio = audio_segment + silence
+        padded_audio.export(audio_path, format="wav")
+    except Exception as pad_err:
+        pass # If pydub fails, proceed with the original audio
+        
     # Формируем путь к видео файлу на основе param (имя аватара)
     video_path = os.path.join(VIDEO_DIR, f"{param}.mp4")
     

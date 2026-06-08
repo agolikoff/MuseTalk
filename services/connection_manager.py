@@ -100,7 +100,10 @@ class ConnectionManager:
             
             
             
-        rtc_config = RTCConfiguration(iceServers=ice_servers)
+        rtc_config = RTCConfiguration(
+            bundlePolicy="max-bundle",
+            iceServers=ice_servers
+        )
         pc = RTCPeerConnection(configuration=rtc_config)
         
         with self._connections_lock:

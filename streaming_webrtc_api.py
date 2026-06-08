@@ -20,7 +20,9 @@ import yaml
 import time
 import hashlib
 import requests
+import urllib.parse
 from typing import Optional, Dict
+from pydub import AudioSegment
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
@@ -269,6 +271,17 @@ async def ensure_welcome_audio(text: str, hash_str: str, audio_dir: str, setting
             if response.status_code == 200:
                 with open(audio_path, "wb") as f:
                     f.write(response.content)
+                
+                # Append 2 seconds of silence
+                try:
+                    audio_segment = AudioSegment.from_wav(audio_path)
+                    silence = AudioSegment.silent(duration=0)
+                    padded_audio = audio_segment + silence
+                    padded_audio.export(audio_path, format="wav")
+                    logger.info(f"Appended 2 seconds of silence to: {audio_path}")
+                except Exception as pad_err:
+                    logger.error(f"Failed to pad TTS audio: {pad_err}")
+                    
                 logger.info(f"Welcome audio saved to: {audio_path}")
                 return audio_path
             else:
@@ -297,11 +310,56 @@ async def webrtc_offer(
         # Use provided task_id or generate one
         task_id = request.task_id if request.task_id else str(int(time.time() * 1000))
         video_path = request.video_path
+        
+        if video_path.startswith("http://") or video_path.startswith("https://"):
+            parsed_url = urllib.parse.urlparse(video_path)
+            filename = os.path.basename(parsed_url.path)
+            if not filename:
+                filename = hashlib.md5(video_path.encode('utf-8')).hexdigest() + ".mp4"
+                
+            local_path = os.path.join("data", "video", filename)
+            
+            if not os.path.exists(local_path):
+                logger.info(f"Downloading video from {video_path} to {local_path}...")
+                loop = asyncio.get_event_loop()
+                def fetch_video():
+                    response = requests.get(video_path, stream=True, timeout=120)
+                    response.raise_for_status()
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                    with open(local_path, "wb") as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                try:
+                    await loop.run_in_executor(None, fetch_video)
+                    logger.info(f"Successfully downloaded video to {local_path}")
+                except Exception as e:
+                    logger.error(f"Failed to download video from {video_path}: {e}")
+                    raise HTTPException(status_code=400, detail=f"Failed to download video from URL: {e}")
+            else:
+                logger.info(f"Video already exists at {local_path}, skipping download.")
+                
+            video_path = local_path
+
         fps = request.fps
         batch_size = request.batch_size
         
         logger.info(f"Получен WebRTC Offer. Task ID: {task_id}, Video: {video_path}")
         
+        if not os.path.exists(video_path):
+            logger.error(f"Video path not found: {video_path}")
+            raise HTTPException(status_code=400, detail=f"Видео файл или директория не найдены: {video_path}")
+            
+        if os.path.isfile(video_path) and os.path.getsize(video_path) == 0:
+            logger.error(f"Video file is empty: {video_path}")
+            raise HTTPException(status_code=400, detail=f"Видео файл пуст: {video_path}")
+            
+        if os.path.isdir(video_path):
+            img_exts = {'.png', '.jpg', '.jpeg'}
+            has_images = any(os.path.splitext(f)[1].lower() in img_exts for f in os.listdir(video_path))
+            if not has_images:
+                logger.error(f"Directory contains no images: {video_path}")
+                raise HTTPException(status_code=400, detail=f"В директории нет изображений: {video_path}")
+            
         offer_desc = RTCSessionDescription(sdp=sdp, type=type)
         
         # Создаем PC через менеджер
@@ -689,6 +747,21 @@ async def upload_audio_and_generate(
         content = await audio_file.read()
         with open(new_audio_path, "wb") as f:
             f.write(content)
+            
+        # Append 2 seconds of silence
+        try:
+            audio_segment = AudioSegment.from_file(new_audio_path)
+            silence = AudioSegment.silent(duration=0)
+            padded_audio = audio_segment + silence
+            
+            # Export maintaining original extension if possible or default to wav
+            export_format = file_extension.lstrip('.') if file_extension else 'wav'
+            # pydub handles m4a/mp3 using ffmpeg
+            padded_audio.export(new_audio_path, format=export_format)
+            logger.info(f"Appended 2 seconds of silence to uploaded audio: {new_audio_path}")
+        except Exception as pad_err:
+            logger.error(f"Failed to pad uploaded audio: {pad_err}")
+
     except Exception as e:
         logger.error(f"Ошибка при сохранении аудио файла: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to save audio file")

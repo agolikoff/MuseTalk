@@ -273,7 +273,7 @@ class InferenceService:
                                              except:
                                                  break
                                 
-                                video_track.add_frames_batch(frame_batch)
+                                await video_track.add_frames_batch_async(frame_batch)
                                 frame_batch = []
                         else:
                             break
@@ -282,14 +282,14 @@ class InferenceService:
                 
                 if status.get("status") == "completed":
                     if frame_batch:
-                        video_track.add_frames_batch(frame_batch)
+                        await video_track.add_frames_batch_async(frame_batch)
                     
                     # Дочитываем остатки
                     while current_frame_index < status.get("total_frames", 0):
                         try:
                             frame_array = mmap_reader.read_frame(current_frame_index)
                             if frame_array is not None:
-                                video_track.add_frame(frame_array)
+                                await video_track.add_frame_async(frame_array)
                                 
                                 # Capture remaining frames
                                 if capture_video_path and video_writer:
@@ -304,11 +304,11 @@ class InferenceService:
                     break
                 elif status.get("status") in ["stopped", "error"]:
                     if frame_batch:
-                        video_track.add_frames_batch(frame_batch)
+                        await video_track.add_frames_batch_async(frame_batch)
                     break
                 
                 if len(frame_batch) > 0 and (time.time() - start_time) % 0.1 < 0.01:
-                    video_track.add_frames_batch(frame_batch)
+                    await video_track.add_frames_batch_async(frame_batch)
                     frame_batch = []
                 
                 await asyncio.sleep(0.01)
