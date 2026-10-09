@@ -20,3 +20,4 @@ exp_out
 streaming_webrtc_api-old.py
 *.sql
 /data
+/.env
